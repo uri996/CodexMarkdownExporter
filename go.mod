@@ -1,4 +1,4 @@
-module codex-exporter
+module github.com/faceair/codex-exporter
 
 go 1.24.2
 

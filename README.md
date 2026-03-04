@@ -1,71 +1,85 @@
 # codex-exporter
 
-将 Codex 的 session rollout（`rollout-*.jsonl`）导出为 Markdown。
+Export Codex session rollout files (`rollout-*.jsonl`) to Markdown.
 
-## 功能概览
+## Features
 
-- 从 Codex sessions 目录扫描可导出的会话。
-- 默认仅显示并导出当前工作目录（`cwd`）对应的会话；可用 `-all` 关闭该过滤。
-- 默认进入交互式会话选择器；可用 `-last` 或 `-session-id` 跳过选择器。
-- 默认仅导出用户消息和助手最终回复（`final` / `final_answer`）。
-- 使用 `-full` 可导出完整对话（包含助手非最终 phase），并在 Markdown 顶部附带完整元数据。
-- 默认输出文件名为 `./codex-session-<session-id>.md`；已存在时需加 `-force` 才会覆盖。
+- Scans the Codex sessions directory for exportable sessions.
+- By default, only lists and exports sessions matching the current working directory (`cwd`); use `-all` to disable this filter.
+- Opens the interactive session picker by default; use `-last` or `-session-id` to skip it.
+- By default, exports only user messages and the assistant final reply (`final` / `final_answer`).
+- Use `-full` to export the complete conversation (including non-final assistant phases) and include full metadata at the top of the Markdown file.
+- Default output file is `./codex-session-<session-id>.md`; existing files require `-force` to overwrite.
 
-## 环境要求
+## Requirements
 
-- Go `1.24.2` 或更高版本（以 `go.mod` 为准）。
+- Go `1.24.2` or later (as defined in `go.mod`).
 
-## 安装与运行
+## Install and Run
 
-### 方式 1：直接运行
+### Option 1: Install to local Go bin
+
+```bash
+go install github.com/faceair/codex-exporter@latest
+codex-exporter
+```
+
+### Option 2: Run directly
 
 ```bash
 go run .
 ```
 
-### 方式 2：构建后运行
+### Option 3: Build then run
 
 ```bash
 go build -o codex-exporter .
 ./codex-exporter
 ```
 
-## 参数说明
+## CLI Options
 
-以下参数以 `go run . -h` 的实际输出为准：
+The following options are aligned with `go run . -h`:
 
-| 参数 | 类型 | 默认值 | 说明 |
+| Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `-all` | bool | `false` | 显示所有会话（关闭当前目录过滤） |
-| `-force` | bool | `false` | 覆盖已存在的输出文件 |
-| `-full` | bool | `false` | 导出完整对话（包含助手非 final phase） |
-| `-last` | bool | `false` | 直接导出最新会话，不进入选择器 |
-| `-output` | string | 空 | 指定输出 Markdown 文件路径 |
-| `-session-id` | string | 空 | 按会话 ID 直接导出，不进入选择器 |
-| `-sessions-dir` | string | `~/.codex/sessions` | Codex sessions 目录 |
+| `-all` | bool | `false` | Show all sessions (disable current-cwd filter) |
+| `-force` | bool | `false` | Overwrite an existing output file |
+| `-full` | bool | `false` | Export full conversation (include non-final assistant phases) |
+| `-last` | bool | `false` | Export latest session without picker |
+| `-output` | string | empty | Output Markdown file path |
+| `-session-id` | string | empty | Export by session ID without picker |
+| `-sessions-dir` | string | `~/.codex/sessions` | Codex sessions directory |
 
-## 使用示例
+## Usage Examples
 
 ```bash
-# 交互选择当前目录下的会话并导出
+# Interactively select a session for the current directory and export it
 go run .
 
-# 显示所有目录的会话再选择
+# Show sessions from all directories, then select one
 go run . -all
 
-# 直接导出最新会话
+# Export the latest session directly
 go run . -last
 
-# 指定会话 ID，导出到固定文件并允许覆盖
+# Export a specific session ID to a fixed file path and allow overwrite
 go run . -session-id 11111111-1111-1111-1111-111111111111 -output ./session.md -force
 
-# 导出完整对话（含非 final phase）
+# Export the full conversation (including non-final assistant phases)
 go run . -last -full
 ```
 
-## 测试
+## Testing
 
 ```bash
 go test ./...
 ```
 
+## Release CI
+
+Release builds are triggered by pushing tags that match `v*`.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
