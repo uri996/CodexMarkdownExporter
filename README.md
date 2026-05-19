@@ -1,6 +1,6 @@
 # codex-exporter
 
-Export Codex session rollout files (`rollout-*.jsonl`) to Markdown.
+Export Codex session rollout files (`rollout-*.jsonl`) to Markdown or HTML.
 
 ## Features
 
@@ -8,8 +8,11 @@ Export Codex session rollout files (`rollout-*.jsonl`) to Markdown.
 - By default, only lists and exports sessions matching the current working directory (`cwd`); use `-all` to disable this filter.
 - Opens the interactive session picker by default; use `-last` or `-session-id` to skip it.
 - By default, exports only user messages and the assistant final reply (`final` / `final_answer`).
-- Use `-full` to export the complete conversation (including non-final assistant phases) and include full metadata at the top of the Markdown file.
-- Default output file is `./codex-session-<session-id>.md`; existing files require `-force` to overwrite.
+- Markdown exports use `codex-exporter` HTML comments as stable session/message boundaries instead of `### User` / `### Assistant` headings.
+- Internal `<oai-mem-citation>` blocks are stripped from exported assistant text.
+- HTML is the default output format; use `-format markdown` to export Markdown.
+- Use `-full` to export the complete conversation (including non-final assistant phases) and include full metadata at the top of the export.
+- Default output file is `./codex-session-<session-id>.html`; Markdown exports use `.md`; existing files require `-force` to overwrite.
 
 ## Requirements
 
@@ -45,9 +48,10 @@ The following options are aligned with `go run . -h`:
 | --- | --- | --- | --- |
 | `-all` | bool | `false` | Show all sessions (disable current-cwd filter) |
 | `-force` | bool | `false` | Overwrite an existing output file |
+| `-format` | string | `html` | Output format: `html` / `htm` or `markdown` / `md` |
 | `-full` | bool | `false` | Export full conversation (include non-final assistant phases) |
 | `-last` | bool | `false` | Export latest session without picker |
-| `-output` | string | empty | Output Markdown file path |
+| `-output` | string | empty | Output file path |
 | `-session-id` | string | empty | Export by session ID without picker |
 | `-sessions-dir` | string | `~/.codex/sessions` | Codex sessions directory |
 
@@ -60,11 +64,14 @@ go run .
 # Show sessions from all directories, then select one
 go run . -all
 
-# Export the latest session directly
+# Export the latest session directly as HTML
 go run . -last
 
 # Export a specific session ID to a fixed file path and allow overwrite
-go run . -session-id 11111111-1111-1111-1111-111111111111 -output ./session.md -force
+go run . -session-id 11111111-1111-1111-1111-111111111111 -output ./session.html -force
+
+# Export the latest session as Markdown
+go run . -last -format markdown
 
 # Export the full conversation (including non-final assistant phases)
 go run . -last -full
