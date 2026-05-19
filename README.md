@@ -11,6 +11,7 @@ Export Codex session rollout files (`rollout-*.jsonl`) to Markdown or HTML.
 - Markdown exports use `codex-exporter` HTML comments as stable session/message boundaries instead of `### User` / `### Assistant` headings.
 - Internal `<oai-mem-citation>` blocks are stripped from exported assistant text.
 - HTML is the default output format; use `-format markdown` to export Markdown.
+- HTML exports include a local "Download Markdown" button for saving the same transcript as `.md`.
 - Use `-full` to export the complete conversation (including non-final assistant phases) and include full metadata at the top of the export.
 - Default output file is `./codex-session-<session-id>.html`; Markdown exports use `.md`; existing files require `-force` to overwrite.
 

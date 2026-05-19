@@ -95,9 +95,16 @@ type sessionSummary struct {
 }
 
 type exportMessage struct {
-	Role  string
-	Phase string
-	Body  string
+	Role   string
+	Phase  string
+	Body   string
+	turnID string
+}
+
+type eventPayload struct {
+	Type     string `json:"type"`
+	TurnID   string `json:"turn_id"`
+	NumTurns int    `json:"num_turns"`
 }
 
 type conversationExporter struct {
@@ -126,6 +133,8 @@ type htmlPageData struct {
 	Heading             string
 	IncludeMeta         bool
 	ConversationHeading string
+	MarkdownFilename    string
+	MarkdownSource      string
 	MetaRows            []htmlMetaRow
 	Messages            []htmlMessageView
 	ExportedAt          string
@@ -147,6 +156,9 @@ const sessionHTMLTemplate = `<!doctype html>
     h1 { margin: 0 0 8px; font-size: clamp(2rem, 5vw, 4rem); line-height: 1; letter-spacing: -0.04em; }
     .page-header { margin-bottom: 28px; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
     .export-meta, .transcript-title, .message-header, .metadata dt { color: var(--muted); }
+    .actions { margin-top: 14px; }
+    button { cursor: pointer; padding: 8px 12px; color: inherit; background: var(--panel); border: 1px solid var(--border); border-radius: 999px; font: inherit; font-size: .9rem; }
+    button:hover { border-color: var(--accent); }
     .metadata { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 0 0 28px; padding: 16px; border: 1px solid var(--border); border-radius: 14px; }
     .metadata dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9rem; }
     .transcript-title { margin: 0 0 14px; font-size: .86rem; text-transform: uppercase; letter-spacing: .12em; }
@@ -165,6 +177,7 @@ const sessionHTMLTemplate = `<!doctype html>
     <header class="page-header">
       <h1>{{.Heading}}</h1>
       <p class="export-meta">Exported by <a href="https://github.com/faceair/codex-exporter" rel="noopener noreferrer">codex-exporter</a> at <time>{{.ExportedAt}}</time></p>
+      <div class="actions"><button id="download-markdown" type="button" data-filename="{{.MarkdownFilename}}">Download Markdown</button></div>
     </header>
     {{if .IncludeMeta}}
     <dl class="metadata">{{range .MetaRows}}<dt>{{.Label}}</dt><dd>{{.Value}}</dd>{{end}}</dl>
@@ -180,7 +193,26 @@ const sessionHTMLTemplate = `<!doctype html>
       </article>
       {{end}}{{else}}<p><em>No user/assistant message found in this session.</em></p>{{end}}
     </section>
+    <textarea id="markdown-source" hidden>{{.MarkdownSource}}</textarea>
   </main>
+  <script>
+    (() => {
+      const button = document.getElementById("download-markdown");
+      const source = document.getElementById("markdown-source");
+      if (!button || !source) return;
+      button.addEventListener("click", () => {
+        const blob = new Blob([source.value], { type: "text/markdown;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = button.dataset.filename || "codex-session.md";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      });
+    })();
+  </script>
 </body>
 </html>
 `
@@ -443,6 +475,8 @@ func collectConversation(path string) (sessionMetaPayload, []exportMessage, erro
 	meta := sessionMetaPayload{}
 	metaFound := false
 	messages := make([]exportMessage, 0)
+	activeTurnID := ""
+	turnOrder := make([]string, 0)
 
 	for scanner.Scan() {
 		line := rolloutLine{}
@@ -450,6 +484,23 @@ func collectConversation(path string) (sessionMetaPayload, []exportMessage, erro
 			continue
 		}
 		switch line.Type {
+		case "event_msg":
+			event := eventPayload{}
+			if err := json.Unmarshal(line.Payload, &event); err != nil {
+				continue
+			}
+			switch event.Type {
+			case "task_started":
+				if strings.TrimSpace(event.TurnID) == "" {
+					continue
+				}
+				activeTurnID = event.TurnID
+				if len(turnOrder) == 0 || turnOrder[len(turnOrder)-1] != activeTurnID {
+					turnOrder = append(turnOrder, activeTurnID)
+				}
+			case "thread_rolled_back":
+				messages, turnOrder, activeTurnID = rollbackConversationTurns(messages, turnOrder, activeTurnID, event.NumTurns)
+			}
 		case "session_meta":
 			if metaFound {
 				continue
@@ -472,7 +523,7 @@ func collectConversation(path string) (sessionMetaPayload, []exportMessage, erro
 			if body == "" {
 				continue
 			}
-			messages = append(messages, exportMessage{Role: item.Role, Phase: item.Phase, Body: body})
+			messages = append(messages, exportMessage{Role: item.Role, Phase: item.Phase, Body: body, turnID: activeTurnID})
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -504,6 +555,36 @@ func selectMessagesForExport(messages []exportMessage, full bool) []exportMessag
 		}
 	}
 	return filtered
+}
+
+func rollbackConversationTurns(messages []exportMessage, turnOrder []string, activeTurnID string, numTurns int) ([]exportMessage, []string, string) {
+	if numTurns <= 0 || len(turnOrder) == 0 {
+		return messages, turnOrder, activeTurnID
+	}
+
+	removed := make(map[string]struct{}, numTurns)
+	for i := 0; i < numTurns && len(turnOrder) > 0; i++ {
+		turnID := turnOrder[len(turnOrder)-1]
+		turnOrder = turnOrder[:len(turnOrder)-1]
+		if turnID != "" {
+			removed[turnID] = struct{}{}
+		}
+	}
+	if len(removed) == 0 {
+		return messages, turnOrder, activeTurnID
+	}
+
+	kept := messages[:0]
+	for _, msg := range messages {
+		if _, ok := removed[msg.turnID]; ok {
+			continue
+		}
+		kept = append(kept, msg)
+	}
+	if _, ok := removed[activeTurnID]; ok {
+		activeTurnID = ""
+	}
+	return kept, turnOrder, activeTurnID
 }
 
 func isSystemInjectedUserMessage(body string) bool {
@@ -649,6 +730,8 @@ func (e conversationExporter) HTML() (string, error) {
 		Heading:             heading,
 		IncludeMeta:         e.includeMeta,
 		ConversationHeading: "Transcript",
+		MarkdownFilename:    markdownDownloadFilename(e.summary),
+		MarkdownSource:      e.Markdown(),
 		MetaRows:            e.htmlMetaRows(exportedAt),
 		Messages:            messages,
 		ExportedAt:          exportedAt,
@@ -683,6 +766,10 @@ func (e conversationExporter) htmlMetaRows(exportedAt string) []htmlMetaRow {
 		{Label: "Rollout File", Value: e.summary.Path},
 		{Label: "Exported At", Value: exportedAt},
 	}
+}
+
+func markdownDownloadFilename(summary sessionSummary) string {
+	return filepath.Base(determineOutputPath("", summary, formatMarkdown))
 }
 
 func determineOutputPath(output string, summary sessionSummary, format exportFormat) string {

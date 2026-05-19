@@ -72,6 +72,43 @@ func TestReadSummaryFromRollout(t *testing.T) {
 	}
 }
 
+func TestCollectConversationAppliesThreadRollback(t *testing.T) {
+	dir := t.TempDir()
+	rolloutPath := filepath.Join(dir, "rollout.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-03-04T12:00:00Z","type":"session_meta","payload":{"id":"session-123","timestamp":"2026-03-04T12:00:00Z","cwd":"/tmp/work","source":"cli","model_provider":"quotio"}}`,
+		`{"timestamp":"2026-03-04T12:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-old"}}`,
+		`{"timestamp":"2026-03-04T12:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"old user text"}]}}`,
+		`{"timestamp":"2026-03-04T12:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"old assistant text"}]}}`,
+		`{"timestamp":"2026-03-04T12:00:04Z","type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":1}}`,
+		`{"timestamp":"2026-03-04T12:00:05Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-edited"}}`,
+		`{"timestamp":"2026-03-04T12:00:06Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"edited user text"}]}}`,
+		`{"timestamp":"2026-03-04T12:00:07Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"edited assistant text"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(rolloutPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write rollout fixture: %v", err)
+	}
+
+	_, messages, err := collectConversation(rolloutPath)
+	if err != nil {
+		t.Fatalf("collect conversation: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages after rollback, got %d: %+v", len(messages), messages)
+	}
+	for _, msg := range messages {
+		if strings.Contains(msg.Body, "old") {
+			t.Fatalf("rolled-back message should not be exported: %+v", msg)
+		}
+	}
+	if messages[0].Role != "user" || messages[0].Body != "edited user text" {
+		t.Fatalf("unexpected edited user message: %+v", messages[0])
+	}
+	if messages[1].Role != "assistant" || messages[1].Body != "edited assistant text" {
+		t.Fatalf("unexpected edited assistant message: %+v", messages[1])
+	}
+}
+
 func TestLoadThreadNameIndexLatestWins(t *testing.T) {
 	codexHome := t.TempDir()
 	sessionsDir := filepath.Join(codexHome, "sessions")
@@ -304,6 +341,15 @@ func TestBuildHTMLRendersTranscript(t *testing.T) {
 	}
 	if !strings.Contains(html, `href="https://github.com/faceair/codex-exporter"`) {
 		t.Fatalf("expected project link in html export, got: %s", html)
+	}
+	if !strings.Contains(html, `id="download-markdown"`) {
+		t.Fatalf("expected markdown download button in html export, got: %s", html)
+	}
+	if !strings.Contains(html, `data-filename="codex-session-session-123.md"`) {
+		t.Fatalf("expected markdown download filename in html export, got: %s", html)
+	}
+	if !strings.Contains(html, `id="markdown-source"`) || !strings.Contains(html, "hello **world**") {
+		t.Fatalf("expected embedded markdown source in html export, got: %s", html)
 	}
 	if strings.Contains(html, "oai-mem-citation") || strings.Contains(html, "internal") {
 		t.Fatalf("expected memory citation block to be stripped from html, got: %s", html)
