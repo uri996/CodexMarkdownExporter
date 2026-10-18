@@ -2,12 +2,10 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"html/template"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -19,7 +17,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/yuin/goldmark"
 )
 
 const (
@@ -30,20 +27,11 @@ const (
 var rolloutNamePattern = regexp.MustCompile(`^rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-.+\.jsonl$`)
 var stateDBPattern = regexp.MustCompile(`^state_(\d+)\.sqlite$`)
 var memoryCitationBlockPattern = regexp.MustCompile(`(?s)\n*<oai-mem-citation>\s*.*?</oai-mem-citation>\s*`)
-var excessiveBlankLinesPattern = regexp.MustCompile(`\n{3,}`)
-
-type exportFormat string
-
-const (
-	formatMarkdown exportFormat = "markdown"
-	formatHTML     exportFormat = "html"
-)
 
 type options struct {
 	sessionsDir string
 	showAll     bool
 	output      string
-	format      string
 	last        bool
 	sessionID   string
 	force       bool
@@ -71,10 +59,15 @@ type sessionIndexEntry struct {
 }
 
 type responseItem struct {
-	Type    string        `json:"type"`
-	Role    string        `json:"role,omitempty"`
-	Phase   string        `json:"phase,omitempty"`
-	Content []contentItem `json:"content,omitempty"`
+	Type     string          `json:"type"`
+	Role     string          `json:"role,omitempty"`
+	Phase    string          `json:"phase,omitempty"`
+	Content  []contentItem   `json:"content,omitempty"`
+	Metadata messageMetadata `json:"internal_chat_message_metadata_passthrough,omitempty"`
+}
+
+type messageMetadata struct {
+	ContentItemKinds []string `json:"content_item_kinds,omitempty"`
 }
 
 type contentItem struct {
@@ -95,10 +88,11 @@ type sessionSummary struct {
 }
 
 type exportMessage struct {
-	Role   string
-	Phase  string
-	Body   string
-	turnID string
+	Role      string
+	Phase     string
+	Body      string
+	turnID    string
+	userInput bool // content parts have already been classified before attachment expansion
 }
 
 type eventPayload struct {
@@ -106,116 +100,6 @@ type eventPayload struct {
 	TurnID   string `json:"turn_id"`
 	NumTurns int    `json:"num_turns"`
 }
-
-type conversationExporter struct {
-	summary     sessionSummary
-	meta        sessionMetaPayload
-	messages    []exportMessage
-	includeMeta bool
-}
-
-type htmlMetaRow struct {
-	Label string
-	Value string
-}
-
-type htmlMessageView struct {
-	Index     int
-	Role      string
-	RoleClass string
-	RoleTitle string
-	Phase     string
-	Body      template.HTML
-}
-
-type htmlPageData struct {
-	Title               string
-	Heading             string
-	IncludeMeta         bool
-	ConversationHeading string
-	MarkdownFilename    string
-	MarkdownSource      string
-	MetaRows            []htmlMetaRow
-	Messages            []htmlMessageView
-	ExportedAt          string
-}
-
-const sessionHTMLTemplate = `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="generator" content="codex-exporter">
-  <title>{{.Title}}</title>
-  <style>
-    :root { color-scheme: light dark; --bg: #f7f3ec; --panel: #fffaf2; --muted: #746d64; --border: #ded3c2; --accent: #4c6fff; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #151515; --panel: #202020; --muted: #aaa197; --border: #3b3833; --accent: #91a4ff; } }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    main { width: min(980px, calc(100% - 32px)); margin: 40px auto 72px; }
-    h1 { margin: 0 0 8px; font-size: clamp(2rem, 5vw, 4rem); line-height: 1; letter-spacing: -0.04em; }
-    .page-header { margin-bottom: 28px; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
-    .export-meta, .transcript-title, .message-header, .metadata dt { color: var(--muted); }
-    .actions { margin-top: 14px; }
-    button { cursor: pointer; padding: 8px 12px; color: inherit; background: var(--panel); border: 1px solid var(--border); border-radius: 999px; font: inherit; font-size: .9rem; }
-    button:hover { border-color: var(--accent); }
-    .metadata { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 0 0 28px; padding: 16px; border: 1px solid var(--border); border-radius: 14px; }
-    .metadata dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9rem; }
-    .transcript-title { margin: 0 0 14px; font-size: .86rem; text-transform: uppercase; letter-spacing: .12em; }
-    .message { margin: 0 0 18px; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; }
-    .message-header { display: flex; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border); font-size: .84rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
-    .message-header .phase, a { color: var(--accent); text-transform: none; letter-spacing: 0; }
-    .message-body { padding: 16px 18px 20px; overflow-wrap: anywhere; }
-    .message-body > :first-child { margin-top: 0; } .message-body > :last-child { margin-bottom: 0; }
-    pre { overflow: auto; padding: 12px; border-radius: 10px; background: rgba(127,127,127,.13); }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
-    blockquote { margin: 1em 0; padding-left: 1em; color: var(--muted); border-left: 3px solid var(--border); }
-  </style>
-</head>
-<body>
-  <main data-codex-exporter-format="html">
-    <header class="page-header">
-      <h1>{{.Heading}}</h1>
-      <p class="export-meta">Exported by <a href="https://github.com/faceair/codex-exporter" rel="noopener noreferrer">codex-exporter</a> at <time>{{.ExportedAt}}</time></p>
-      <div class="actions"><button id="download-markdown" type="button" data-filename="{{.MarkdownFilename}}">Download Markdown</button></div>
-    </header>
-    {{if .IncludeMeta}}
-    <dl class="metadata">{{range .MetaRows}}<dt>{{.Label}}</dt><dd>{{.Value}}</dd>{{end}}</dl>
-    {{end}}
-    <section aria-label="{{.ConversationHeading}}">
-      <h2 class="transcript-title">{{.ConversationHeading}}</h2>
-      {{if .Messages}}{{range .Messages}}
-      <article class="message role-{{.RoleClass}}" data-index="{{.Index}}" data-role="{{.Role}}"{{with .Phase}} data-phase="{{.}}"{{end}}>
-        <header class="message-header"><span>{{.RoleTitle}}</span>{{with .Phase}}<span class="phase">{{.}}</span>{{end}}</header>
-        <div class="message-body">
-{{.Body}}
-        </div>
-      </article>
-      {{end}}{{else}}<p><em>No user/assistant message found in this session.</em></p>{{end}}
-    </section>
-    <textarea id="markdown-source" hidden>{{.MarkdownSource}}</textarea>
-  </main>
-  <script>
-    (() => {
-      const button = document.getElementById("download-markdown");
-      const source = document.getElementById("markdown-source");
-      if (!button || !source) return;
-      button.addEventListener("click", () => {
-        const blob = new Blob([source.value], { type: "text/markdown;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = button.dataset.filename || "codex-session.md";
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      });
-    })();
-  </script>
-</body>
-</html>
-`
 
 func main() {
 	if err := run(); err != nil {
@@ -226,10 +110,6 @@ func main() {
 
 func run() error {
 	opts := parseFlags()
-	format, err := parseExportFormat(opts.format)
-	if err != nil {
-		return err
-	}
 	sessionsDir := expandHome(opts.sessionsDir)
 	currentCwd, err := os.Getwd()
 	if err != nil {
@@ -253,25 +133,17 @@ func run() error {
 		return nil
 	}
 
-	outputPath := determineOutputPath(opts.output, *target, format)
-	if !opts.force {
-		if _, err := os.Stat(outputPath); err == nil {
-			return fmt.Errorf("output file already exists: %s (use --force to overwrite)", outputPath)
-		}
-	}
-
-	meta, messages, err := collectConversation(target.Path)
+	_, messages, err := collectConversation(target.Path)
 	if err != nil {
 		return err
 	}
 	messages = selectMessagesForExport(messages, opts.full)
+	messages = normalizePastedTextMessages(messages, codexAttachmentRoot())
 
-	content, err := buildExportContent(*target, meta, messages, opts.full, format)
+	content := buildMarkdown(*target, messages)
+	outputPath, err := writeMarkdownExport(opts.output, *target, content, opts.force)
 	if err != nil {
 		return err
-	}
-	if err := os.WriteFile(outputPath, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("write export file %s: %w", outputPath, err)
 	}
 
 	fmt.Printf("exported %d messages to %s\n", len(messages), outputPath)
@@ -282,25 +154,13 @@ func parseFlags() options {
 	var opts options
 	flag.StringVar(&opts.sessionsDir, "sessions-dir", defaultSessionsDir, "Codex sessions directory")
 	flag.BoolVar(&opts.showAll, "all", false, "show all sessions (disable current-cwd filter)")
-	flag.StringVar(&opts.output, "output", "", "output file path")
-	flag.StringVar(&opts.format, "format", string(formatHTML), "output format: html or markdown")
+	flag.StringVar(&opts.output, "output", "", "Markdown output file path")
 	flag.BoolVar(&opts.last, "last", false, "export latest session without picker")
 	flag.StringVar(&opts.sessionID, "session-id", "", "export by session ID without picker")
-	flag.BoolVar(&opts.force, "force", false, "overwrite existing output file")
+	flag.BoolVar(&opts.force, "force", false, "overwrite an explicitly specified output file")
 	flag.BoolVar(&opts.full, "full", false, "export full conversation (include non-final assistant phases)")
 	flag.Parse()
 	return opts
-}
-
-func parseExportFormat(raw string) (exportFormat, error) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "html", "htm":
-		return formatHTML, nil
-	case "markdown", "md":
-		return formatMarkdown, nil
-	default:
-		return "", fmt.Errorf("unsupported output format %q (use markdown or html)", raw)
-	}
 }
 
 func listSessions(sessionsDir string, currentCwd string, showAll bool) ([]sessionSummary, error) {
@@ -418,6 +278,9 @@ func readSummaryFromRollout(path string) (sessionSummary, bool, error) {
 			if !isInteractiveSource(source) {
 				return sessionSummary{}, false, nil
 			}
+			if summary.CreatedAt.IsZero() {
+				summary.CreatedAt, _ = time.Parse(time.RFC3339Nano, meta.Timestamp)
+			}
 			summary.SessionID = meta.ID
 			summary.Cwd = meta.Cwd
 			summary.Source = source
@@ -519,11 +382,16 @@ func collectConversation(path string) (sessionMetaPayload, []exportMessage, erro
 			if item.Role != "user" && item.Role != "assistant" {
 				continue
 			}
-			body := strings.TrimSpace(cleanExportBody(extractMessageBody(item.Content)))
-			if body == "" {
+			body := extractMessageBody(item.Content)
+			if item.Role == "user" {
+				body = extractUserPrompt(item)
+			} else {
+				body = cleanExportBody(body)
+			}
+			if strings.TrimSpace(body) == "" {
 				continue
 			}
-			messages = append(messages, exportMessage{Role: item.Role, Phase: item.Phase, Body: body, turnID: activeTurnID})
+			messages = append(messages, exportMessage{Role: item.Role, Phase: item.Phase, Body: body, turnID: activeTurnID, userInput: item.Role == "user"})
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -543,7 +411,7 @@ func selectMessagesForExport(messages []exportMessage, full bool) []exportMessag
 	for _, msg := range messages {
 		switch msg.Role {
 		case "user":
-			if isSystemInjectedUserMessage(msg.Body) {
+			if !msg.userInput && isSystemInjectedUserMessage(msg.Body) {
 				continue
 			}
 			filtered = append(filtered, msg)
@@ -587,293 +455,26 @@ func rollbackConversationTurns(messages []exportMessage, turnOrder []string, act
 	return kept, turnOrder, activeTurnID
 }
 
-func isSystemInjectedUserMessage(body string) bool {
-	trimmed := strings.TrimSpace(body)
-	if trimmed == "" {
-		return false
-	}
-	prefixes := []string{
-		"# AGENTS.md instructions for ",
-		"<environment_context>",
-		"<subagent_notification>",
-		"<turn_aborted>",
-		"<permissions instructions>",
-		"<collaboration_mode>",
-	}
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(trimmed, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func buildExportContent(summary sessionSummary, meta sessionMetaPayload, messages []exportMessage, includeMeta bool, format exportFormat) (string, error) {
-	exporter := conversationExporter{
-		summary:     summary,
-		meta:        meta,
-		messages:    messages,
-		includeMeta: includeMeta,
-	}
-	switch format {
-	case formatMarkdown:
-		return exporter.Markdown(), nil
-	case formatHTML:
-		html, err := exporter.HTML()
-		if err != nil {
-			return "", fmt.Errorf("build html export: %w", err)
-		}
-		return html, nil
-	default:
-		return "", fmt.Errorf("unsupported output format %q", format)
-	}
-}
-
-func buildMarkdown(summary sessionSummary, meta sessionMetaPayload, messages []exportMessage, includeMeta bool) string {
-	return conversationExporter{
-		summary:     summary,
-		meta:        meta,
-		messages:    messages,
-		includeMeta: includeMeta,
-	}.Markdown()
-}
-
-func buildHTML(summary sessionSummary, meta sessionMetaPayload, messages []exportMessage, includeMeta bool) (string, error) {
-	return conversationExporter{
-		summary:     summary,
-		meta:        meta,
-		messages:    messages,
-		includeMeta: includeMeta,
-	}.HTML()
-}
-
-func (e conversationExporter) Markdown() string {
+func buildMarkdown(summary sessionSummary, messages []exportMessage) string {
 	var sb strings.Builder
-	mainTitle := "Codex Session Export"
-	if !e.includeMeta {
-		mainTitle = displayTitle(e.summary.Title)
-	}
-	sb.WriteString(fmt.Sprintf("# %s\n\n", mainTitle))
-	sb.WriteString(markdownSessionStartMarker(e))
-	sb.WriteString("\n\n")
-	if e.includeMeta {
-		sb.WriteString(fmt.Sprintf("- Title: `%s`\n", displayTitle(e.summary.Title)))
-		sb.WriteString(fmt.Sprintf("- Session ID: `%s`\n", nonEmpty(e.meta.ID, e.summary.SessionID)))
-		sb.WriteString(fmt.Sprintf("- Source: `%s`\n", nonEmpty(decodeSource(e.meta.SourceRaw), e.summary.Source)))
-		sb.WriteString(fmt.Sprintf("- Model Provider: `%s`\n", nonEmpty(e.meta.ModelProvider, e.summary.ModelProvider)))
-		sb.WriteString(fmt.Sprintf("- CWD: `%s`\n", nonEmpty(e.meta.Cwd, e.summary.Cwd)))
-		sb.WriteString(fmt.Sprintf("- Created: `%s`\n", nonEmpty(e.meta.Timestamp, formatTime(e.summary.CreatedAt))))
-		sb.WriteString(fmt.Sprintf("- Updated: `%s`\n", formatTime(e.summary.UpdatedAt)))
-		sb.WriteString(fmt.Sprintf("- Rollout File: `%s`\n", e.summary.Path))
-		sb.WriteString(fmt.Sprintf("- Exported At: `%s`\n", time.Now().Format(time.RFC3339)))
-		sb.WriteString("\n")
-	}
-	conversationHeading := "## Conversation"
-	if !e.includeMeta {
-		conversationHeading = "## Transcript"
-	}
-	sb.WriteString(conversationHeading + "\n\n")
-
-	if len(e.messages) == 0 {
-		sb.WriteString("_No user/assistant message found in this session._\n")
-		sb.WriteString("\n")
-		sb.WriteString(markdownSessionEndMarker(e))
-		sb.WriteString("\n")
-		return sb.String()
-	}
-
-	for i, msg := range e.messages {
-		index := i + 1
-		sb.WriteString(markdownMessageStartMarker(index, msg))
-		sb.WriteString("\n\n")
-		sb.WriteString(markdownSpeakerLine(msg))
-		sb.WriteString("\n\n")
-		sb.WriteString(cleanExportBody(msg.Body))
-		sb.WriteString("\n")
-		sb.WriteString("\n")
-		sb.WriteString(markdownMessageEndMarker(index))
-		if i != len(e.messages)-1 {
-			sb.WriteString("\n\n---\n\n")
+	fmt.Fprintf(&sb, "# %s\n", displayTitle(summary.Title))
+	for _, msg := range messages {
+		icon := "🧑"
+		if msg.Role == "assistant" {
+			icon = "💻"
 		}
+		fmt.Fprintf(&sb, "\n# %s %s\n\n", icon, humanRole(msg.Role))
+		sb.WriteString(msg.Body)
+		if !strings.HasSuffix(msg.Body, "\n") {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString("\n---\n")
 	}
-	sb.WriteString("\n\n")
-	sb.WriteString(markdownSessionEndMarker(e))
-	sb.WriteString("\n")
-
 	return sb.String()
-}
-
-func (e conversationExporter) HTML() (string, error) {
-	messages := make([]htmlMessageView, 0, len(e.messages))
-	for i, msg := range e.messages {
-		body, err := renderMarkdownFragment(cleanExportBody(msg.Body))
-		if err != nil {
-			return "", fmt.Errorf("render message %d markdown: %w", i+1, err)
-		}
-		messages = append(messages, htmlMessageView{
-			Index:     i + 1,
-			Role:      msg.Role,
-			RoleClass: sanitizeMarkerValue(msg.Role),
-			RoleTitle: humanRole(msg.Role),
-			Phase:     strings.TrimSpace(msg.Phase),
-			Body:      body,
-		})
-	}
-
-	heading := displayTitle(e.summary.Title)
-	if e.includeMeta {
-		heading = "Codex Session Export"
-	}
-	exportedAt := time.Now().Format(time.RFC3339)
-	data := htmlPageData{
-		Title:               displayTitle(e.summary.Title),
-		Heading:             heading,
-		IncludeMeta:         e.includeMeta,
-		ConversationHeading: "Transcript",
-		MarkdownFilename:    markdownDownloadFilename(e.summary),
-		MarkdownSource:      e.Markdown(),
-		MetaRows:            e.htmlMetaRows(exportedAt),
-		Messages:            messages,
-		ExportedAt:          exportedAt,
-	}
-	if e.includeMeta {
-		data.ConversationHeading = "Conversation"
-	}
-
-	var sb strings.Builder
-	tmpl, err := template.New("session-html").Parse(sessionHTMLTemplate)
-	if err != nil {
-		return "", fmt.Errorf("parse html template: %w", err)
-	}
-	if err := tmpl.Execute(&sb, data); err != nil {
-		return "", fmt.Errorf("execute html template: %w", err)
-	}
-	return sb.String(), nil
-}
-
-func (e conversationExporter) htmlMetaRows(exportedAt string) []htmlMetaRow {
-	if !e.includeMeta {
-		return nil
-	}
-	return []htmlMetaRow{
-		{Label: "Title", Value: displayTitle(e.summary.Title)},
-		{Label: "Session ID", Value: nonEmpty(e.meta.ID, e.summary.SessionID)},
-		{Label: "Source", Value: nonEmpty(decodeSource(e.meta.SourceRaw), e.summary.Source)},
-		{Label: "Model Provider", Value: nonEmpty(e.meta.ModelProvider, e.summary.ModelProvider)},
-		{Label: "CWD", Value: nonEmpty(e.meta.Cwd, e.summary.Cwd)},
-		{Label: "Created", Value: nonEmpty(e.meta.Timestamp, formatTime(e.summary.CreatedAt))},
-		{Label: "Updated", Value: formatTime(e.summary.UpdatedAt)},
-		{Label: "Rollout File", Value: e.summary.Path},
-		{Label: "Exported At", Value: exportedAt},
-	}
-}
-
-func markdownDownloadFilename(summary sessionSummary) string {
-	return filepath.Base(determineOutputPath("", summary, formatMarkdown))
-}
-
-func determineOutputPath(output string, summary sessionSummary, format exportFormat) string {
-	if output != "" {
-		return output
-	}
-	sessionID := summary.SessionID
-	if sessionID == "" {
-		sessionID = strings.TrimSuffix(filepath.Base(summary.Path), filepath.Ext(summary.Path))
-	}
-	return filepath.Join(".", fmt.Sprintf("codex-session-%s%s", sessionID, format.fileExtension()))
-}
-
-func (format exportFormat) fileExtension() string {
-	switch format {
-	case formatHTML:
-		return ".html"
-	default:
-		return ".md"
-	}
 }
 
 func cleanExportBody(body string) string {
-	cleaned := memoryCitationBlockPattern.ReplaceAllString(body, "\n\n")
-	cleaned = excessiveBlankLinesPattern.ReplaceAllString(cleaned, "\n\n")
-	return strings.TrimSpace(cleaned)
-}
-
-func markdownSessionStartMarker(e conversationExporter) string {
-	if !e.includeMeta {
-		return "<!-- codex-exporter:session-start format=markdown -->"
-	}
-	return fmt.Sprintf(
-		"<!-- codex-exporter:session-start id=%s format=markdown -->",
-		sanitizeMarkerValue(nonEmpty(e.meta.ID, e.summary.SessionID)),
-	)
-}
-
-func markdownSessionEndMarker(e conversationExporter) string {
-	if !e.includeMeta {
-		return "<!-- codex-exporter:session-end -->"
-	}
-	return fmt.Sprintf(
-		"<!-- codex-exporter:session-end id=%s -->",
-		sanitizeMarkerValue(nonEmpty(e.meta.ID, e.summary.SessionID)),
-	)
-}
-
-func markdownMessageStartMarker(index int, msg exportMessage) string {
-	parts := []string{
-		"codex-exporter:message-start",
-		fmt.Sprintf("index=%d", index),
-		fmt.Sprintf("role=%s", sanitizeMarkerValue(msg.Role)),
-	}
-	if strings.TrimSpace(msg.Phase) != "" {
-		parts = append(parts, fmt.Sprintf("phase=%s", sanitizeMarkerValue(msg.Phase)))
-	}
-	return fmt.Sprintf("<!-- %s -->", strings.Join(parts, " "))
-}
-
-func markdownMessageEndMarker(index int) string {
-	return fmt.Sprintf("<!-- codex-exporter:message-end index=%d -->", index)
-}
-
-func markdownSpeakerLine(msg exportMessage) string {
-	line := fmt.Sprintf("**Speaker:** %s", humanRole(msg.Role))
-	if strings.TrimSpace(msg.Phase) != "" {
-		line += fmt.Sprintf("  \n**Phase:** `%s`", strings.TrimSpace(msg.Phase))
-	}
-	return line
-}
-
-func sanitizeMarkerValue(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return "unknown"
-	}
-	var sb strings.Builder
-	for _, r := range trimmed {
-		switch {
-		case r >= 'a' && r <= 'z':
-			sb.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			sb.WriteRune(r)
-		case r >= '0' && r <= '9':
-			sb.WriteRune(r)
-		case r == '-' || r == '_' || r == '.' || r == ':':
-			sb.WriteRune(r)
-		default:
-			sb.WriteRune('_')
-		}
-	}
-	if sb.Len() == 0 {
-		return "unknown"
-	}
-	return sb.String()
-}
-
-func renderMarkdownFragment(markdown string) (template.HTML, error) {
-	var buf bytes.Buffer
-	if err := goldmark.Convert([]byte(markdown), &buf); err != nil {
-		return "", err
-	}
-	return template.HTML(buf.String()), nil
+	return memoryCitationBlockPattern.ReplaceAllString(body, "\n\n")
 }
 
 func loadThreadNameIndex(sessionsDir string) (map[string]string, error) {
@@ -1047,13 +648,6 @@ func isInteractiveSource(source string) bool {
 	return source == "cli" || source == "vscode"
 }
 
-func formatTime(t time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-	return t.Format("2006-01-02 15:04:05")
-}
-
 func truncateString(input string, limit int) string {
 	if limit <= 0 {
 		return ""
@@ -1148,16 +742,6 @@ func expandHome(path string) string {
 		}
 	}
 	return path
-}
-
-func nonEmpty(primary string, fallback string) string {
-	if strings.TrimSpace(primary) != "" {
-		return primary
-	}
-	if strings.TrimSpace(fallback) != "" {
-		return fallback
-	}
-	return "-"
 }
 
 func humanRole(role string) string {
