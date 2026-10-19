@@ -92,7 +92,7 @@ func TestDefaultFilenameDirectoryBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Chdir(dir)
-		path, err := determineOutputPath("", sessionSummary{Title: strings.Repeat("中文", 100)})
+		path, err := determineOutputPathInDir("", dir, sessionSummary{Title: strings.Repeat("中文", 100)})
 		if directoryUnits == 220 {
 			if err == nil {
 				t.Fatal("overlong directory should require explicit shorter output path")
@@ -158,12 +158,12 @@ func TestHumanReadableOutputNames(t *testing.T) {
 		{"CON", "20261013_CON.md"},
 		{"alpha  \t beta_2-3", "20261013_alpha-beta_2-3.md"},
 	} {
-		got, err := determineOutputPath("", sessionSummary{Title: tc.title, CreatedAt: created, SessionID: "12345678-abcd-1234-abcd-123456789012"})
+		got, err := filenameForDirectory(t.TempDir(), sessionSummary{Title: tc.title, CreatedAt: created, SessionID: "12345678-abcd-1234-abcd-123456789012"})
 		if err != nil || got != tc.want {
 			t.Fatalf("title %q: got %q, %v; want %q", tc.title, got, err, tc.want)
 		}
 	}
-	got, err := determineOutputPath("", sessionSummary{Title: strings.Repeat("中文🌏", 120), CreatedAt: created})
+	got, err := filenameForDirectory(t.TempDir(), sessionSummary{Title: strings.Repeat("中文🌏", 120), CreatedAt: created})
 	if err != nil || !utf8.ValidString(got) || filenameUnits(strings.TrimSuffix(strings.TrimPrefix(got, "20261013_"), ".md")) > 100 {
 		t.Fatalf("unsafe long filename %q: %v", got, err)
 	}
@@ -175,17 +175,18 @@ func TestHumanReadableOutputNames(t *testing.T) {
 	if got, err := determineOutputPath(custom, sessionSummary{}); err != nil || got != custom {
 		t.Fatalf("custom path changed: %q, %v", got, err)
 	}
-	if got, err := determineOutputPath("", sessionSummary{Title: "filename-date", Path: "rollout-2026-01-02T03-04-05-synthetic.jsonl"}); err != nil || got != "20260102_filename-date.md" {
+	if got, err := filenameForDirectory(t.TempDir(), sessionSummary{Title: "filename-date", Path: "rollout-2026-01-02T03-04-05-synthetic.jsonl"}); err != nil || got != "20260102_filename-date.md" {
 		t.Fatalf("creation date fallback: %q, %v", got, err)
 	}
 }
 
 func TestOutputCollisionsAndExplicitOverwrite(t *testing.T) {
-	t.Chdir(t.TempDir())
+	directory := t.TempDir()
+	t.Chdir(directory)
 	summary := sessionSummary{Title: "同名", CreatedAt: time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)}
 	for i, name := range []string{"20261013_同名.md", "20261013_同名_2.md", "20261013_同名_3.md"} {
-		got, err := writeMarkdownExport("", summary, "original", i == 2)
-		if err != nil || got != name {
+		got, err := writeMarkdownExportInDir("", directory, summary, "original", i == 2)
+		if err != nil || filepath.Base(got) != name {
 			t.Fatalf("collision filename: %q, %v", got, err)
 		}
 	}

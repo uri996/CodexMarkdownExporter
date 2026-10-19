@@ -52,17 +52,40 @@ func safeFilenameTitle(title string, limit int) string {
 }
 
 func determineOutputPath(output string, summary sessionSummary) (string, error) {
+	return determineOutputPathInDir(output, "", summary)
+}
+
+func resolveOutputRoot(directory string) (string, error) {
+	if directory == "" {
+		return savedOutputRoot()
+	}
+	return filepath.Abs(expandHome(directory))
+}
+
+func determineOutputPathInDir(output, directory string, summary sessionSummary) (string, error) {
 	if output != "" {
 		return output, nil
 	}
-	cwd, err := os.Getwd()
+	directory, err := resolveOutputRoot(directory)
+	if err != nil {
+		return "", err
+	}
+	name, err := filenameForDirectory(directory, summary)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(directory, name), nil
+}
+
+func filenameForDirectory(directory string, summary sessionSummary) (string, error) {
+	directory, err := filepath.Abs(directory)
 	if err != nil {
 		return "", err
 	}
 	// Date prefix, extension, separator, and room for a collision suffix.
-	limit := min(100, maxOutputPathUnits-filenameUnits(cwd)-1-9-3-12)
+	limit := min(100, maxOutputPathUnits-filenameUnits(directory)-1-9-3-12)
 	if limit < 24 {
-		return "", errors.New("current directory path is too long; use -output with a shorter path")
+		return "", errors.New("export directory path is too long; choose a shorter output directory or -output path")
 	}
 	title := safeFilenameTitle(summary.Title, limit)
 	if title == "" {
@@ -84,9 +107,16 @@ func determineOutputPath(output string, summary sessionSummary) (string, error) 
 }
 
 func writeMarkdownExport(output string, summary sessionSummary, content string, force bool) (string, error) {
-	base, err := determineOutputPath(output, summary)
+	return writeMarkdownExportInDir(output, "", summary, content, force)
+}
+
+func writeMarkdownExportInDir(output, directory string, summary sessionSummary, content string, force bool) (string, error) {
+	base, err := determineOutputPathInDir(output, directory, summary)
 	if err != nil {
 		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(base), 0o700); err != nil {
+		return "", fmt.Errorf("create export directory: %w", err)
 	}
 	for suffix := 1; ; suffix++ {
 		path := base
@@ -110,11 +140,16 @@ func writeMarkdownExport(output string, summary sessionSummary, content string, 
 		if err != nil {
 			return "", fmt.Errorf("create export file %s: %w", path, err)
 		}
-		_, writeErr := file.WriteString(content)
-		closeErr := file.Close()
-		if err := errors.Join(writeErr, closeErr); err != nil {
+		if err := finishMarkdownFile(file, content); err != nil {
 			return "", fmt.Errorf("write export file %s: %w", path, err)
 		}
 		return path, nil
 	}
+}
+
+func finishMarkdownFile(file *os.File, content string) error {
+	_, writeErr := file.WriteString(content)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	return errors.Join(writeErr, syncErr, closeErr)
 }

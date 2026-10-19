@@ -48,3 +48,56 @@ func TestPastedTextWindowsJunctionEscape(t *testing.T) {
 		t.Fatalf("expected safe fallback, got %q", got)
 	}
 }
+
+func TestV11WindowsBatchSourceFailure(t *testing.T) {
+	_, project := projectFixture(t)
+	name, err := syscall.UTF16PtrFromString(project.Sessions[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := syscall.CreateFile(name, syscall.GENERIC_READ, 0, nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.CloseHandle(handle)
+	r := exportProjectSessions(filepath.Join(t.TempDir(), "exports"), project)
+	if r.ReadFailed != 1 || r.Success != 1 {
+		t.Fatalf("Windows locked source stopped the batch: %+v", r)
+	}
+}
+
+func TestLockedSettingsPreserveDefault(t *testing.T) {
+	home := isolatedHome(t)
+	one := filepath.Join(home, "first choice")
+	if err := saveOutputRoot(one); err != nil {
+		t.Fatal(err)
+	}
+	path, err := settingsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := syscall.CreateFile(name, syscall.GENERIC_READ, 0, nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = syscall.CloseHandle(handle)
+		}
+	}()
+	if err := saveOutputRoot(filepath.Join(home, "second choice")); err == nil {
+		t.Fatal("locked settings update did not report failure")
+	}
+	if err := syscall.CloseHandle(handle); err != nil {
+		t.Fatal(err)
+	}
+	closed = true
+	if got, err := savedOutputRoot(); err != nil || got != one {
+		t.Fatal("failed settings update lost previous choice")
+	}
+}

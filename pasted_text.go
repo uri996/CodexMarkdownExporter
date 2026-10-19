@@ -45,7 +45,7 @@ func pastedTextFailure(err error) string {
 	return pastedTextUnavailable + reason + "]"
 }
 
-var pastedTextWrapper = regexp.MustCompile(`(?ms)^(?:#{1,6}[ \t]+)?Files pasted by the user:[ \t]*\r?\n(.*?)^Pasted text contains the user's request\.[ \t]*(?:\r?\n|$)(?:\r?\n)*(?:#{1,6}[ \t]+My request:[ \t]*(?:\r?\n|$))?`)
+var pastedTextWrapper = regexp.MustCompile(`(?ms)^(?:#{1,6}[ \t]+)?Files pasted by the user:[ \t]*\r?\n(.*?)^(?:Pasted text contains the user's request\.[ \t]*(?:\r?\n|$)(?:\r?\n)*(?:(?:#{1,6}[ \t]+)?My request:[ \t]*(?:\r?\n|$))?|(?:#{1,6}[ \t]+)?My request:[ \t]*(?:\r?\n|$))`)
 var pastedTextLabel = regexp.MustCompile(`^(?:#{1,6}[ \t]+)?"[^\r\n]+":[ \t]*(.*)$`)
 var attachmentUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
@@ -80,12 +80,14 @@ func normalizePastedTextMessages(messages []exportMessage, root string) []export
 func resolvePastedTextAttachments(body, root string) string {
 	// Replacement is deliberately non-recursive: attachment text is user content,
 	// even when it contains another wrapper or local path.
-	return pastedTextWrapper.ReplaceAllStringFunc(body, func(wrapper string) string {
-		match := pastedTextWrapper.FindStringSubmatch(wrapper)
-		paths, ok := pastedTextPaths(match[1])
-		if !ok {
-			return wrapper // Unknown schema: do not guess paths or read anything.
+	var output strings.Builder
+	last := 0
+	for _, match := range pastedTextWrapper.FindAllStringSubmatchIndex(body, -1) {
+		paths, ok := pastedTextPaths(body[match[2]:match[3]])
+		if !ok || markdownLiteralAt(body, match[0]) {
+			continue
 		}
+		output.WriteString(body[last:match[0]])
 		parts := make([]string, 0, len(paths))
 		for _, path := range paths {
 			text, err := readPastedText(root, path)
@@ -94,8 +96,11 @@ func resolvePastedTextAttachments(body, root string) string {
 			}
 			parts = append(parts, text)
 		}
-		return strings.Join(parts, "\n\n") + "\n\n"
-	})
+		output.WriteString(strings.Join(parts, "\n\n") + "\n\n")
+		last = match[1]
+	}
+	output.WriteString(body[last:])
+	return output.String()
 }
 
 // Accept only quoted preview entries, with the path either on the same line or
