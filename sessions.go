@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -16,7 +17,7 @@ import (
 	"time"
 )
 
-var rolloutNamePattern = regexp.MustCompile(`^rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-.+\.jsonl$`)
+var rolloutNamePattern = regexp.MustCompile(`^rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-.+\.jsonl(?:\.zst)?$`)
 var stateDBPattern = regexp.MustCompile(`^state_(\d+)\.sqlite$`)
 
 type discoveryResult struct {
@@ -27,7 +28,7 @@ type discoveryResult struct {
 }
 
 func listSessions(sessionsDir string, currentCwd string, showAll bool) ([]sessionSummary, error) {
-	found := discoverSessions(sessionsDir, false)
+	found := discoverSessions(sessionsDir, true)
 	summaries := make([]sessionSummary, 0, len(found.Sessions))
 	for _, summary := range found.Sessions {
 		if !showAll && (summary.Cwd == "" || normalizePath(summary.Cwd) != normalizePath(currentCwd)) {
@@ -107,7 +108,7 @@ func findRolloutFiles(root string) ([]string, error) {
 			issues = append(issues, fmt.Errorf("scan sessions directory: %w", walkErr))
 			return nil
 		}
-		if !d.IsDir() && strings.HasPrefix(d.Name(), "rollout-") && strings.HasSuffix(d.Name(), ".jsonl") {
+		if !d.IsDir() && strings.HasPrefix(d.Name(), "rollout-") && isRolloutPath(d.Name()) {
 			files = append(files, path)
 		}
 		return nil
@@ -119,21 +120,20 @@ func findRolloutFiles(root string) ([]string, error) {
 }
 
 func readSummaryFromRollout(path string) (sessionSummary, bool, error) {
-	file, err := os.Open(path)
+	file, err := openRollout(path)
 	if err != nil {
 		return sessionSummary{}, false, err
 	}
 	defer file.Close()
 
-	summary := sessionSummary{Path: path}
-	fileInfo, statErr := file.Stat()
+	summary := sessionSummary{Path: file.Path}
+	fileInfo, statErr := file.file.Stat()
 	if statErr == nil {
 		summary.UpdatedAt = fileInfo.ModTime()
 	}
-	summary.CreatedAt = parseCreatedAtFromFilename(filepath.Base(path))
+	summary.CreatedAt = parseCreatedAtFromFilename(filepath.Base(file.Path))
 
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024*1024), scannerBufferSize)
+	scanner := newRolloutScanner(file)
 
 	metaFound := false
 
@@ -169,11 +169,18 @@ func readSummaryFromRollout(path string) (sessionSummary, bool, error) {
 			break
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	if err := rolloutScanError(scanner); err != nil {
 		return sessionSummary{}, false, err
 	}
 	if !metaFound {
 		return sessionSummary{}, false, fmt.Errorf("missing session_meta in %s", path)
+	}
+	// Validate the remaining compressed stream, including its checksum, before
+	// advertising an interactive source as readable. No transcript is buffered.
+	if file.decoder != nil {
+		if _, err := io.Copy(io.Discard, file); err != nil {
+			return sessionSummary{}, false, err
+		}
 	}
 	return summary, true, nil
 }
@@ -227,6 +234,7 @@ func loadThreadTitlesFromStateDB(codexHome string) (map[string]string, error) {
 
 	cmd := exec.Command(
 		"sqlite3",
+		"-readonly",
 		"-noheader",
 		"-separator",
 		"\t",

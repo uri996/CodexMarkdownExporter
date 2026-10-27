@@ -59,7 +59,7 @@ func resolveOutputRoot(directory string) (string, error) {
 	if directory == "" {
 		return savedOutputRoot()
 	}
-	return filepath.Abs(expandHome(directory))
+	return resolveExplicitOutputDirectory(directory)
 }
 
 func determineOutputPathInDir(output, directory string, summary sessionSummary) (string, error) {

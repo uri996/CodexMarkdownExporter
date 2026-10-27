@@ -41,7 +41,7 @@ func newSessionPickerModel(summaries []sessionSummary, showAll bool, now time.Ti
 		showAll:   showAll,
 		now:       now,
 		selected:  -1,
-		width:     120,
+		width:     80,
 		height:    24,
 	}
 
@@ -66,25 +66,34 @@ func sessionPickerColumns(showAll bool, width int) []table.Column {
 	if width <= 0 {
 		width = 120
 	}
-	if showAll {
-		const fixedWidth = 6 + 12 + 12 + 28
-		titleWidth := pickerMaxInt(20, width-fixedWidth)
-		return []table.Column{
-			{Title: "Index", Width: 6},
-			{Title: "Updated", Width: 12},
-			{Title: "Created", Width: 12},
-			{Title: "CWD", Width: 28},
-			{Title: "Title", Width: titleWidth},
-		}
-	}
-	const fixedWidth = 6 + 12 + 12
-	titleWidth := pickerMaxInt(24, width-fixedWidth)
-	return []table.Column{
+	columns := []table.Column{
 		{Title: "Index", Width: 6},
 		{Title: "Updated", Width: 12},
 		{Title: "Created", Width: 12},
-		{Title: "Title", Width: titleWidth},
 	}
+	if width < 110 {
+		columns[1].Width, columns[2].Width = 9, 9
+	}
+	if width < 52 {
+		columns[1].Width, columns[2].Width = 0, 0
+	}
+	if showAll {
+		cwdWidth := 28
+		if width < 110 {
+			cwdWidth = 18
+		}
+		if width < 72 {
+			cwdWidth = 0
+		}
+		columns = append(columns, table.Column{Title: "CWD", Width: cwdWidth})
+	}
+	remaining := pickerContentWidth(width) - 2 // title cell padding
+	for _, column := range columns {
+		if column.Width > 0 {
+			remaining -= column.Width + 2
+		}
+	}
+	return append(columns, table.Column{Title: "Title", Width: max(1, remaining)})
 }
 
 func sessionPickerRows(summaries []sessionSummary, showAll bool, now time.Time) []table.Row {
@@ -100,9 +109,9 @@ func sessionPickerRows(summaries []sessionSummary, showAll bool, now time.Time) 
 			relativeTime(summary.CreatedAt, now),
 		}
 		if showAll {
-			row = append(row, truncateString(summary.Cwd, 28))
+			row = append(row, truncateString(pickerCellText(summary.Cwd), 28))
 		}
-		row = append(row, truncateString(displayTitle(summary.Title), titleLimit))
+		row = append(row, truncateString(pickerCellText(displayTitle(summary.Title)), titleLimit))
 		rows = append(rows, row)
 	}
 	return rows
@@ -115,10 +124,11 @@ func (m *sessionPickerModel) updateTableLayout() {
 	m.tableHeight = pickerTableHeight(m.height)
 	m.table.SetHeight(m.tableHeight)
 	m.table.SetColumns(sessionPickerColumns(m.showAll, m.width))
+	m.table.SetWidth(pickerContentWidth(m.width))
 }
 
 func pickerTableHeight(height int) int {
-	return pickerMaxInt(5, height-8)
+	return pickerMaxInt(2, height-6)
 }
 
 func pickerMaxInt(left int, right int) int {
@@ -140,20 +150,32 @@ func (m *sessionPickerModel) moveCursor(offset int) {
 	if next > maxCursor {
 		next = maxCursor
 	}
-	m.table.SetCursor(next)
+	// MoveUp/MoveDown also maintain the table viewport offset. SetCursor alone
+	// does not keep the selected row visible after crossing a page boundary.
+	if next > m.table.Cursor() {
+		m.table.MoveDown(next - m.table.Cursor())
+	} else {
+		m.table.MoveUp(m.table.Cursor() - next)
+	}
 }
 
 func (m sessionPickerModel) Init() tea.Cmd {
-	return nil
+	return tea.ClearScreen
 }
 
 func (m sessionPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
+	case pickerWindowSizeMsg:
+		return m, pickerResizeCommand(typed, m.width, m.height)
 	case tea.WindowSizeMsg:
+		changed := m.width != typed.Width || m.height != typed.Height
 		m.width = typed.Width
 		m.height = typed.Height
 		m.updateTableLayout()
-		return m, nil
+		if changed {
+			return m, tea.Batch(tea.ClearScreen, pollPickerWindow(m.width, m.height))
+		}
+		return m, pollPickerWindow(m.width, m.height)
 	case tea.KeyMsg:
 		switch typed.String() {
 		case "q", "esc", "ctrl+c":
@@ -184,6 +206,9 @@ func (m sessionPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m sessionPickerModel) View() string {
+	if m.width < 16 || m.height < 7 {
+		return fitPickerView("请扩大窗口 / Esc 退出", m.width, m.height)
+	}
 	scope := "current cwd"
 	if m.showAll {
 		scope = "all sessions"
@@ -195,7 +220,7 @@ func (m sessionPickerModel) View() string {
 		m.table.View(),
 		pickerHelpStyle.Render("j/k or up/down: move | enter: select | q/esc/ctrl+c: cancel"),
 	}
-	return strings.Join(lines, "\n")
+	return fitPickerView(strings.Join(lines, "\n"), m.width, m.height)
 }
 
 func runSessionPicker(summaries []sessionSummary, showAll bool, now time.Time, factory teaProgramFactory, programOpts ...tea.ProgramOption) (int, bool, error) {
@@ -204,6 +229,8 @@ func runSessionPicker(summaries []sessionSummary, showAll bool, now time.Time, f
 	}
 
 	model := newSessionPickerModel(summaries, showAll, now)
+	model.width, model.height = pickerInitialSize()
+	model.updateTableLayout()
 	allProgramOpts := append([]tea.ProgramOption{tea.WithAltScreen()}, programOpts...)
 	finalModel, err := factory(model, allProgramOpts...).Run()
 	if err != nil {

@@ -1,0 +1,14 @@
+/dist/
+/codex-exporter.exe
+/.codex-exporter/
+/settings.json
+*.jsonl
+*.jsonl.zst
+/exports/
+/Codex-Exports/
+/sessions/
+/archived_sessions/
+/attachments/
+**/.codex-exporter/
+**/settings.json
+/ADDITIONAL_LICENSE.md

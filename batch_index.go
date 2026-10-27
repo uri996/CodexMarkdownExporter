@@ -12,11 +12,12 @@ import (
 )
 
 type batchEntry struct {
-	File       string `json:"file"`
-	Status     string `json:"status"`
-	SessionKey string `json:"session_key"`
-	SourceHash string `json:"source_hash"`
-	OutputHash string `json:"output_hash"`
+	File         string `json:"file"`
+	Status       string `json:"status"`
+	SessionKey   string `json:"session_key"`
+	SourceHash   string `json:"source_hash"`
+	OutputHash   string `json:"output_hash"`
+	SourceFormat string `json:"source_format,omitempty"`
 }
 
 type batchIndex struct {
@@ -68,6 +69,9 @@ func readBatchIndex(path, key string) (batchIndex, error) {
 		return index, errors.New("invalid batch index identity or output directory")
 	}
 	for source, entry := range index.Entries {
+		if entry.SourceFormat != "" && entry.SourceFormat != "jsonl" && entry.SourceFormat != "zstd" {
+			return index, errors.New("invalid batch source format")
+		}
 		if !validFingerprint(source) || !safeLeaf(entry.File) || windowsReservedName(entry.File) || !strings.HasSuffix(entry.File, ".md") ||
 			(entry.Status != "pending" && entry.Status != "done") || !validFingerprint(entry.SessionKey) || !validFingerprint(entry.SourceHash) || !validFingerprint(entry.OutputHash) {
 			return index, errors.New("invalid batch index entry; refusing unsafe recovery")

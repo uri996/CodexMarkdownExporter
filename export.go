@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 )
@@ -13,14 +11,13 @@ import (
 var memoryCitationBlockPattern = regexp.MustCompile(`(?s)\n*<oai-mem-citation>\s*.*?</oai-mem-citation>\s*`)
 
 func collectConversation(path string) (sessionMetaPayload, []exportMessage, error) {
-	file, err := os.Open(path)
+	file, err := openRollout(path)
 	if err != nil {
 		return sessionMetaPayload{}, nil, err
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024*1024), scannerBufferSize)
+	scanner := newRolloutScanner(file)
 
 	meta := sessionMetaPayload{}
 	metaFound := false
@@ -81,7 +78,7 @@ func collectConversation(path string) (sessionMetaPayload, []exportMessage, erro
 			messages = append(messages, exportMessage{Role: item.Role, Phase: item.Phase, Body: body, turnID: activeTurnID, userInput: item.Role == "user"})
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	if err := rolloutScanError(scanner); err != nil {
 		return sessionMetaPayload{}, nil, err
 	}
 	if !metaFound {

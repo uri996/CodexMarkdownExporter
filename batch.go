@@ -30,10 +30,22 @@ func (r batchResult) failed() bool { return r.ReadFailed+r.WriteFailed+r.IndexFa
 
 func sessionSourceKey(s sessionSummary) string {
 	// Content is not part of identity: appending turns never creates a new key.
-	return fingerprint(s.SessionID + "\x00" + normalizePath(s.Path))
+	return fingerprint(s.SessionID + "\x00" + logicalRolloutPath(s.Path))
 }
 
 func fileFingerprint(path string) (string, error) {
+	if isRolloutPath(path) {
+		reader, err := openRollout(path)
+		if err != nil {
+			return "", err
+		}
+		defer reader.Close()
+		hash := sha256.New()
+		if _, err := io.Copy(hash, reader); err != nil {
+			return "", err
+		}
+		return hex.EncodeToString(hash.Sum(nil)), nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -126,9 +138,9 @@ func exportProjectSessions(root string, project projectSummary) batchResult {
 		}
 	}
 	seenIDs := make(map[string]map[string]bool)
+	processed := make(map[string]string)
 	for _, summary := range project.Sessions {
-		key := sessionSourceKey(summary)
-		short := key[:12]
+		short := sessionSourceKey(summary)[:12]
 		digest, err := fileFingerprint(summary.Path)
 		if err != nil {
 			fail("read", short, err)
@@ -142,6 +154,23 @@ func exportProjectSessions(root string, project projectSummary) batchResult {
 			result.Conflicts++
 		}
 		seenIDs[idKey][digest] = true
+		baseKey := sessionSourceKey(summary)
+		previousBase := index.Entries[baseKey]
+		key, identityChanged := batchSourceIdentity(summary, digest, &index)
+		if identityChanged {
+			if err := saveBatchIndex(indexPath, index); err != nil {
+				// Disk still owns the previous mapping. Do not proceed with an
+				// identity reassignment that was not durably recorded.
+				index.Entries[baseKey] = previousBase
+				delete(index.Entries, fingerprint(baseKey+"\x00zstd-variant"))
+				fail("index", short, err)
+				continue
+			}
+		}
+		if processed[key] == digest {
+			result.Deduplicated++
+			continue
+		}
 		entry, exists := index.Entries[key]
 		if exists {
 			path := filepath.Join(directory, entry.File)
@@ -151,6 +180,9 @@ func exportProjectSessions(root string, project projectSummary) batchResult {
 					fail("write", short, errors.New("existing target is not a regular file"))
 					continue
 				}
+				previousEntry := entry
+				changed := entry.SourceFormat != rolloutFormat(summary.Path)
+				entry.SourceFormat = rolloutFormat(summary.Path)
 				if entry.Status == "pending" {
 					actual, readErr := fileFingerprint(path)
 					if readErr != nil || actual != entry.OutputHash {
@@ -158,16 +190,19 @@ func exportProjectSessions(root string, project projectSummary) batchResult {
 						continue
 					}
 					entry.Status = "done"
+					changed = true
+				}
+				if changed {
 					index.Entries[key] = entry
 					if err := saveBatchIndex(indexPath, index); err != nil {
-						entry.Status = "pending"
-						index.Entries[key] = entry
+						index.Entries[key] = previousEntry
 						fail("index", short, err)
 						continue
 					}
 				}
 				result.Skipped++
-				seenContent[digest] = entry
+				seenContent[entry.SourceHash] = entry
+				processed[key] = digest
 				continue // preserve hand edits and growing-session snapshots
 			}
 			if !errors.Is(statErr, os.ErrNotExist) {
@@ -176,12 +211,14 @@ func exportProjectSessions(root string, project projectSummary) batchResult {
 			}
 		}
 		if previous, ok := seenContent[digest]; ok {
+			previous.SourceFormat = rolloutFormat(summary.Path)
 			index.Entries[key] = previous
 			if err := saveBatchIndex(indexPath, index); err != nil {
 				fail("index", short, err)
 				continue
 			}
 			result.Deduplicated++
+			processed[key] = digest
 			continue
 		}
 		content, _, err := renderSession(summary, false)
@@ -207,6 +244,7 @@ func exportProjectSessions(root string, project projectSummary) batchResult {
 		entry.SessionKey = idKey
 		entry.SourceHash = digest
 		entry.OutputHash = fingerprint(content)
+		entry.SourceFormat = rolloutFormat(summary.Path)
 		index.Entries[key] = entry
 		if err := saveBatchIndex(indexPath, index); err != nil {
 			fail("index", short, err)
@@ -237,6 +275,7 @@ func exportProjectSessions(root string, project projectSummary) batchResult {
 		result.Success++
 		result.AttachmentWarnings += strings.Count(content, pastedTextUnavailable)
 		seenContent[digest] = entry
+		processed[key] = digest
 	}
 	return result
 }
@@ -268,6 +307,9 @@ func runBatchExport(opts options) error {
 	}
 	for i, issue := range issues {
 		fmt.Fprintf(os.Stderr, "Discovery/grouping issue %d: %s; scan may be incomplete\n", i+1, safeFailure(issue))
+		if opts.report != nil {
+			opts.report.DiscoveryErrors = append(opts.report.DiscoveryErrors, "扫描/归属问题："+safeFailure(issue))
+		}
 	}
 	if project.Historical {
 		fmt.Fprintln(os.Stderr, "Historical cwd: grouping uses exact recorded paths; former repository boundaries cannot be recovered.")
@@ -276,6 +318,14 @@ func runBatchExport(opts options) error {
 		return errors.New("no interactive sessions could be assigned to the selected project")
 	}
 	result := exportProjectSessions(opts.outputDir, project)
+	if opts.report != nil {
+		opts.report.Project = project.Name
+		opts.report.Batch = &result
+		opts.report.Directory = result.Directory
+		opts.report.Rollouts = found.Rollouts
+		opts.report.Interactive = found.Interactive
+		opts.report.Issues = len(issues)
+	}
 	fmt.Printf("Project: %s\nProject rollout records: %d\nExported: %d\nExisting skipped: %d\nDuplicates: %d\nSame-ID content conflicts: %d\nRead failures: %d\nWrite failures: %d\nIndex failures: %d\nMarkdown files created: %d\nAttachment warnings: %d\nDiscovery/grouping issues: %d\nOutput: %s\n",
 		project.Name, result.Selected, result.Success, result.Skipped, result.Deduplicated, result.Conflicts, result.ReadFailed, result.WriteFailed, result.IndexFailed, result.Written, result.AttachmentWarnings, len(issues), result.Directory)
 	for _, message := range result.Errors {

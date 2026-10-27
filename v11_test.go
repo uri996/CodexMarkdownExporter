@@ -576,6 +576,9 @@ func TestV11BatchCLIIsolationAndIncompleteScan(t *testing.T) {
 func TestV11ProjectPicker(t *testing.T) {
 	_, project := projectFixture(t)
 	m := newProjectPickerModel([]projectSummary{project})
+	// Full-path assertions need a viewport wide enough for this temporary path.
+	resized, _ := m.Update(tea.WindowSizeMsg{Width: 2*len([]rune(project.Root)) + 60, Height: 24})
+	m = resized.(projectPickerModel)
 	if view := m.View(); !strings.Contains(view, project.Root) || !strings.Contains(view, project.Name) || !strings.Contains(view, "2") {
 		t.Fatal("project picker lacks identity/count")
 	}

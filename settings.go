@@ -14,7 +14,8 @@ import (
 var errNoOutputDirectory = errors.New("no output directory configured; use -set-output-dir <directory> to save a default, -output-dir <directory> for this run, or -output <file> for a single export")
 
 type userSettings struct {
-	OutputDirectory string `json:"output_directory"`
+	OutputDirectory  string `json:"output_directory"`
+	PortableRelative bool   `json:"portable_relative,omitempty"`
 }
 
 func settingsPath() (string, error) {
@@ -38,7 +39,19 @@ func savedOutputRoot() (string, error) {
 		return "", fmt.Errorf("read output directory settings: %w", err)
 	}
 	var settings userSettings
-	if err := json.Unmarshal(data, &settings); err != nil || !filepath.IsAbs(settings.OutputDirectory) {
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return "", errors.New("invalid output directory settings; repair with -set-output-dir <directory>")
+	}
+	if settings.PortableRelative {
+		if portableBuild != "true" {
+			return "", errors.New("portable relative output settings require a portable build; use -output-dir <directory> or -set-output-dir <directory> for source runs")
+		}
+		if !filepath.IsLocal(settings.OutputDirectory) {
+			return "", errors.New("invalid portable output directory settings")
+		}
+		return resolveExplicitOutputDirectory(settings.OutputDirectory)
+	}
+	if !filepath.IsAbs(settings.OutputDirectory) {
 		return "", errors.New("invalid output directory settings; repair with -set-output-dir <directory>")
 	}
 	return filepath.Clean(settings.OutputDirectory), nil
@@ -48,12 +61,21 @@ func saveOutputRoot(directory string) error {
 	if strings.TrimSpace(directory) == "" {
 		return errors.New("default output directory must not be empty")
 	}
-	directory, err := filepath.Abs(expandHome(directory))
+	stored := filepath.Clean(expandHome(strings.TrimSpace(directory)))
+	relative := portableBuild == "true" && !filepath.IsAbs(stored)
+	directory, err := resolveExplicitOutputDirectory(stored)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create chosen output directory: %w", err)
+	}
+	probe, err := os.CreateTemp(directory, ".codex-exporter-write-check-*")
+	if err != nil {
+		return fmt.Errorf("chosen output directory is not writable: %w", err)
+	}
+	if err := errors.Join(probe.Close(), os.Remove(probe.Name())); err != nil {
+		return fmt.Errorf("check chosen output directory: %w", err)
 	}
 	path, err := settingsPath()
 	if err != nil {
@@ -67,7 +89,10 @@ func saveOutputRoot(directory string) error {
 		return err
 	}
 	defer os.Remove(temp.Name())
-	encodeErr := json.NewEncoder(temp).Encode(userSettings{OutputDirectory: directory})
+	if !relative {
+		stored = directory
+	}
+	encodeErr := json.NewEncoder(temp).Encode(userSettings{OutputDirectory: stored, PortableRelative: relative})
 	syncErr := temp.Sync()
 	closeErr := temp.Close()
 	if err := errors.Join(encodeErr, syncErr, closeErr); err != nil {
@@ -106,7 +131,8 @@ func chooseOutputRoot(input io.Reader, output io.Writer, interactive bool) (stri
 	if directory == "" {
 		return "", errNoOutputDirectory
 	}
-	directory, err = filepath.Abs(expandHome(directory))
+	chosen := directory
+	directory, err = resolveExplicitOutputDirectory(directory)
 	if err != nil {
 		return "", err
 	}
@@ -116,7 +142,7 @@ func chooseOutputRoot(input io.Reader, output io.Writer, interactive bool) (stri
 		return "", fmt.Errorf("%w; save confirmation unavailable: %v", errNoOutputDirectory, err)
 	}
 	if strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes") {
-		if err := saveOutputRoot(directory); err != nil {
+		if err := saveOutputRoot(chosen); err != nil {
 			return "", err
 		}
 	}

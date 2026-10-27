@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultSessionsDir = "~/.codex/sessions"
-	scannerBufferSize  = 16 * 1024 * 1024
+	scannerBufferSize  = 64 * 1024 * 1024
 )
 
 type options struct {
@@ -31,6 +31,9 @@ type options struct {
 	project      string
 	outputDir    string
 	setOutputDir string
+	single       bool
+	version      bool
+	report       *portableReport
 	explicit     map[string]bool
 }
 
@@ -109,6 +112,16 @@ func run() error {
 	if err := validateOptions(opts); err != nil {
 		return err
 	}
+	if opts.version {
+		fmt.Printf("Codex Exporter %s\n", version)
+		return nil
+	}
+	if len(os.Args) == 1 {
+		if !consoleInteractive() {
+			return errors.New("无参数启动需要交互式终端；使用 -help 查看命令行用法")
+		}
+		return runPortableMenu()
+	}
 	if opts.setOutputDir != "" {
 		if err := saveOutputRoot(opts.setOutputDir); err != nil {
 			return err
@@ -139,6 +152,9 @@ func runSingleExport(opts options) error {
 	summaries, err := listSessions(sessionsDir, currentCwd, opts.showAll)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Session discovery is incomplete: %s\n", safeFailure(err))
+		if opts.report != nil {
+			opts.report.DiscoveryErrors = append(opts.report.DiscoveryErrors, "扫描不完整："+safeFailure(err))
+		}
 		if len(summaries) == 0 {
 			return err
 		}
@@ -166,12 +182,23 @@ func runSingleExport(opts options) error {
 	}
 
 	fmt.Printf("exported %d messages to %s\n", count, outputPath)
+	if opts.report != nil {
+		opts.report.File = filepath.Base(outputPath)
+		opts.report.Directory, _ = filepath.Abs(filepath.Dir(outputPath))
+		opts.report.Messages = count
+	}
 	return nil
 }
 
 func parseFlags() options {
 	var opts options
-	flag.StringVar(&opts.sessionsDir, "sessions-dir", defaultSessionsDir, "Codex sessions directory")
+	flag.CommandLine.Usage = func() {
+		fmt.Fprintln(flag.CommandLine.Output(), "Codex Exporter "+version+"\n无参数：中文主菜单（需要交互终端）\n-single：单独导出 | -batch：项目批量导出\n-set-output-dir <目录>：保存默认目录 | -output-dir <目录>：仅本次使用")
+		flag.PrintDefaults()
+	}
+	flag.StringVar(&opts.sessionsDir, "sessions-dir", sessionStorageDirectory(), "Codex sessions directory")
+	flag.BoolVar(&opts.single, "single", false, "open Session Picker across all interactive sessions")
+	flag.BoolVar(&opts.version, "version", false, "show program version and exit")
 	flag.BoolVar(&opts.showAll, "all", false, "show all sessions (disable current-cwd filter)")
 	flag.StringVar(&opts.output, "output", "", "Markdown output file path")
 	flag.BoolVar(&opts.last, "last", false, "export latest session without picker")
@@ -183,18 +210,34 @@ func parseFlags() options {
 	flag.StringVar(&opts.outputDir, "output-dir", "", "export root directory for this run (does not change saved default)")
 	flag.StringVar(&opts.setOutputDir, "set-output-dir", "", "save or change the default export directory, then exit")
 	flag.Parse()
+	if flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "unexpected positional arguments; use -help")
+		os.Exit(2)
+	}
 	opts.explicit = make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) { opts.explicit[f.Name] = true })
+	if opts.single {
+		opts.showAll = true
+	}
 	return opts
 }
 
 func validateOptions(opts options) error {
 	provided := func(name string, value bool) bool { return opts.explicit[name] || value }
+	if provided("version", opts.version) {
+		if len(opts.explicit) > 1 {
+			return errors.New("-version cannot be combined with export options")
+		}
+		return nil
+	}
+	if provided("single", opts.single) && (opts.batch || provided("last", opts.last) || provided("session-id", opts.sessionID != "")) {
+		return errors.New("-single opens the Session Picker; cannot combine with -batch, -last or -session-id")
+	}
 	if provided("set-output-dir", opts.setOutputDir != "") {
 		if strings.TrimSpace(opts.setOutputDir) == "" {
 			return errors.New("-set-output-dir must not be empty")
 		}
-		if len(opts.explicit) > 1 || opts.batch || opts.output != "" || opts.outputDir != "" || opts.project != "" || opts.last || opts.sessionID != "" || opts.showAll || opts.force || opts.full {
+		if len(opts.explicit) > 1 || opts.single || opts.batch || opts.output != "" || opts.outputDir != "" || opts.project != "" || opts.last || opts.sessionID != "" || opts.showAll || opts.force || opts.full {
 			return errors.New("-set-output-dir is a standalone settings command; do not combine it with export options")
 		}
 		return nil
