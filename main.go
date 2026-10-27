@@ -1,53 +1,40 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"html/template"
-	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
+	"runtime"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/yuin/goldmark"
 )
 
 const (
 	defaultSessionsDir = "~/.codex/sessions"
-	scannerBufferSize  = 16 * 1024 * 1024
-)
-
-var rolloutNamePattern = regexp.MustCompile(`^rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-.+\.jsonl$`)
-var stateDBPattern = regexp.MustCompile(`^state_(\d+)\.sqlite$`)
-var memoryCitationBlockPattern = regexp.MustCompile(`(?s)\n*<oai-mem-citation>\s*.*?</oai-mem-citation>\s*`)
-var excessiveBlankLinesPattern = regexp.MustCompile(`\n{3,}`)
-
-type exportFormat string
-
-const (
-	formatMarkdown exportFormat = "markdown"
-	formatHTML     exportFormat = "html"
+	scannerBufferSize  = 64 * 1024 * 1024
 )
 
 type options struct {
-	sessionsDir string
-	showAll     bool
-	output      string
-	format      string
-	last        bool
-	sessionID   string
-	force       bool
-	full        bool
+	sessionsDir  string
+	showAll      bool
+	output       string
+	last         bool
+	sessionID    string
+	force        bool
+	full         bool
+	batch        bool
+	project      string
+	outputDir    string
+	setOutputDir string
+	single       bool
+	version      bool
+	report       *portableReport
+	explicit     map[string]bool
 }
 
 type rolloutLine struct {
@@ -71,10 +58,15 @@ type sessionIndexEntry struct {
 }
 
 type responseItem struct {
-	Type    string        `json:"type"`
-	Role    string        `json:"role,omitempty"`
-	Phase   string        `json:"phase,omitempty"`
-	Content []contentItem `json:"content,omitempty"`
+	Type     string          `json:"type"`
+	Role     string          `json:"role,omitempty"`
+	Phase    string          `json:"phase,omitempty"`
+	Content  []contentItem   `json:"content,omitempty"`
+	Metadata messageMetadata `json:"internal_chat_message_metadata_passthrough,omitempty"`
+}
+
+type messageMetadata struct {
+	ContentItemKinds []string `json:"content_item_kinds,omitempty"`
 }
 
 type contentItem struct {
@@ -95,10 +87,11 @@ type sessionSummary struct {
 }
 
 type exportMessage struct {
-	Role   string
-	Phase  string
-	Body   string
-	turnID string
+	Role      string
+	Phase     string
+	Body      string
+	turnID    string
+	userInput bool // content parts have already been classified before attachment expansion
 }
 
 type eventPayload struct {
@@ -106,116 +99,6 @@ type eventPayload struct {
 	TurnID   string `json:"turn_id"`
 	NumTurns int    `json:"num_turns"`
 }
-
-type conversationExporter struct {
-	summary     sessionSummary
-	meta        sessionMetaPayload
-	messages    []exportMessage
-	includeMeta bool
-}
-
-type htmlMetaRow struct {
-	Label string
-	Value string
-}
-
-type htmlMessageView struct {
-	Index     int
-	Role      string
-	RoleClass string
-	RoleTitle string
-	Phase     string
-	Body      template.HTML
-}
-
-type htmlPageData struct {
-	Title               string
-	Heading             string
-	IncludeMeta         bool
-	ConversationHeading string
-	MarkdownFilename    string
-	MarkdownSource      string
-	MetaRows            []htmlMetaRow
-	Messages            []htmlMessageView
-	ExportedAt          string
-}
-
-const sessionHTMLTemplate = `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="generator" content="codex-exporter">
-  <title>{{.Title}}</title>
-  <style>
-    :root { color-scheme: light dark; --bg: #f7f3ec; --panel: #fffaf2; --muted: #746d64; --border: #ded3c2; --accent: #4c6fff; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #151515; --panel: #202020; --muted: #aaa197; --border: #3b3833; --accent: #91a4ff; } }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    main { width: min(980px, calc(100% - 32px)); margin: 40px auto 72px; }
-    h1 { margin: 0 0 8px; font-size: clamp(2rem, 5vw, 4rem); line-height: 1; letter-spacing: -0.04em; }
-    .page-header { margin-bottom: 28px; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
-    .export-meta, .transcript-title, .message-header, .metadata dt { color: var(--muted); }
-    .actions { margin-top: 14px; }
-    button { cursor: pointer; padding: 8px 12px; color: inherit; background: var(--panel); border: 1px solid var(--border); border-radius: 999px; font: inherit; font-size: .9rem; }
-    button:hover { border-color: var(--accent); }
-    .metadata { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 0 0 28px; padding: 16px; border: 1px solid var(--border); border-radius: 14px; }
-    .metadata dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9rem; }
-    .transcript-title { margin: 0 0 14px; font-size: .86rem; text-transform: uppercase; letter-spacing: .12em; }
-    .message { margin: 0 0 18px; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; }
-    .message-header { display: flex; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border); font-size: .84rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
-    .message-header .phase, a { color: var(--accent); text-transform: none; letter-spacing: 0; }
-    .message-body { padding: 16px 18px 20px; overflow-wrap: anywhere; }
-    .message-body > :first-child { margin-top: 0; } .message-body > :last-child { margin-bottom: 0; }
-    pre { overflow: auto; padding: 12px; border-radius: 10px; background: rgba(127,127,127,.13); }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
-    blockquote { margin: 1em 0; padding-left: 1em; color: var(--muted); border-left: 3px solid var(--border); }
-  </style>
-</head>
-<body>
-  <main data-codex-exporter-format="html">
-    <header class="page-header">
-      <h1>{{.Heading}}</h1>
-      <p class="export-meta">Exported by <a href="https://github.com/faceair/codex-exporter" rel="noopener noreferrer">codex-exporter</a> at <time>{{.ExportedAt}}</time></p>
-      <div class="actions"><button id="download-markdown" type="button" data-filename="{{.MarkdownFilename}}">Download Markdown</button></div>
-    </header>
-    {{if .IncludeMeta}}
-    <dl class="metadata">{{range .MetaRows}}<dt>{{.Label}}</dt><dd>{{.Value}}</dd>{{end}}</dl>
-    {{end}}
-    <section aria-label="{{.ConversationHeading}}">
-      <h2 class="transcript-title">{{.ConversationHeading}}</h2>
-      {{if .Messages}}{{range .Messages}}
-      <article class="message role-{{.RoleClass}}" data-index="{{.Index}}" data-role="{{.Role}}"{{with .Phase}} data-phase="{{.}}"{{end}}>
-        <header class="message-header"><span>{{.RoleTitle}}</span>{{with .Phase}}<span class="phase">{{.}}</span>{{end}}</header>
-        <div class="message-body">
-{{.Body}}
-        </div>
-      </article>
-      {{end}}{{else}}<p><em>No user/assistant message found in this session.</em></p>{{end}}
-    </section>
-    <textarea id="markdown-source" hidden>{{.MarkdownSource}}</textarea>
-  </main>
-  <script>
-    (() => {
-      const button = document.getElementById("download-markdown");
-      const source = document.getElementById("markdown-source");
-      if (!button || !source) return;
-      button.addEventListener("click", () => {
-        const blob = new Blob([source.value], { type: "text/markdown;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = button.dataset.filename || "codex-session.md";
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      });
-    })();
-  </script>
-</body>
-</html>
-`
 
 func main() {
 	if err := run(); err != nil {
@@ -226,10 +109,40 @@ func main() {
 
 func run() error {
 	opts := parseFlags()
-	format, err := parseExportFormat(opts.format)
-	if err != nil {
+	if err := validateOptions(opts); err != nil {
 		return err
 	}
+	if opts.version {
+		fmt.Printf("Codex Exporter %s\n", version)
+		return nil
+	}
+	if len(os.Args) == 1 {
+		if !consoleInteractive() {
+			return errors.New("无参数启动需要交互式终端；使用 -help 查看命令行用法")
+		}
+		return runPortableMenu()
+	}
+	if opts.setOutputDir != "" {
+		if err := saveOutputRoot(opts.setOutputDir); err != nil {
+			return err
+		}
+		fmt.Println("Default output directory saved.")
+		return nil
+	}
+	if opts.output == "" && opts.outputDir == "" {
+		root, err := chooseOutputRoot(os.Stdin, os.Stdout, consoleInteractive())
+		if err != nil {
+			return err
+		}
+		opts.outputDir = root
+	}
+	if opts.batch {
+		return runBatchExport(opts)
+	}
+	return runSingleExport(opts)
+}
+
+func runSingleExport(opts options) error {
 	sessionsDir := expandHome(opts.sessionsDir)
 	currentCwd, err := os.Getwd()
 	if err != nil {
@@ -238,7 +151,13 @@ func run() error {
 
 	summaries, err := listSessions(sessionsDir, currentCwd, opts.showAll)
 	if err != nil {
-		return err
+		fmt.Fprintf(os.Stderr, "Session discovery is incomplete: %s\n", safeFailure(err))
+		if opts.report != nil {
+			opts.report.DiscoveryErrors = append(opts.report.DiscoveryErrors, "扫描不完整："+safeFailure(err))
+		}
+		if len(summaries) == 0 {
+			return err
+		}
 	}
 	if len(summaries) == 0 {
 		return errors.New("no sessions found")
@@ -253,189 +172,102 @@ func run() error {
 		return nil
 	}
 
-	outputPath := determineOutputPath(opts.output, *target, format)
-	if !opts.force {
-		if _, err := os.Stat(outputPath); err == nil {
-			return fmt.Errorf("output file already exists: %s (use --force to overwrite)", outputPath)
-		}
-	}
-
-	meta, messages, err := collectConversation(target.Path)
+	content, count, err := renderSession(*target, opts.full)
 	if err != nil {
 		return err
 	}
-	messages = selectMessagesForExport(messages, opts.full)
-
-	content, err := buildExportContent(*target, meta, messages, opts.full, format)
+	outputPath, err := writeMarkdownExportInDir(opts.output, opts.outputDir, *target, content, opts.force)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(outputPath, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("write export file %s: %w", outputPath, err)
-	}
 
-	fmt.Printf("exported %d messages to %s\n", len(messages), outputPath)
+	fmt.Printf("exported %d messages to %s\n", count, outputPath)
+	if opts.report != nil {
+		opts.report.File = filepath.Base(outputPath)
+		opts.report.Directory, _ = filepath.Abs(filepath.Dir(outputPath))
+		opts.report.Messages = count
+	}
 	return nil
 }
 
 func parseFlags() options {
 	var opts options
-	flag.StringVar(&opts.sessionsDir, "sessions-dir", defaultSessionsDir, "Codex sessions directory")
+	flag.CommandLine.Usage = func() {
+		fmt.Fprintln(flag.CommandLine.Output(), "Codex Exporter "+version+"\n无参数：中文主菜单（需要交互终端）\n-single：单独导出 | -batch：项目批量导出\n-set-output-dir <目录>：保存默认目录 | -output-dir <目录>：仅本次使用")
+		flag.PrintDefaults()
+	}
+	flag.StringVar(&opts.sessionsDir, "sessions-dir", sessionStorageDirectory(), "Codex sessions directory")
+	flag.BoolVar(&opts.single, "single", false, "open Session Picker across all interactive sessions")
+	flag.BoolVar(&opts.version, "version", false, "show program version and exit")
 	flag.BoolVar(&opts.showAll, "all", false, "show all sessions (disable current-cwd filter)")
-	flag.StringVar(&opts.output, "output", "", "output file path")
-	flag.StringVar(&opts.format, "format", string(formatHTML), "output format: html or markdown")
+	flag.StringVar(&opts.output, "output", "", "Markdown output file path")
 	flag.BoolVar(&opts.last, "last", false, "export latest session without picker")
 	flag.StringVar(&opts.sessionID, "session-id", "", "export by session ID without picker")
-	flag.BoolVar(&opts.force, "force", false, "overwrite existing output file")
+	flag.BoolVar(&opts.force, "force", false, "overwrite an explicitly specified output file")
 	flag.BoolVar(&opts.full, "full", false, "export full conversation (include non-final assistant phases)")
+	flag.BoolVar(&opts.batch, "batch", false, "export all interactive sessions belonging to one project")
+	flag.StringVar(&opts.project, "project", "", "project path (batch mode only; otherwise open project picker)")
+	flag.StringVar(&opts.outputDir, "output-dir", "", "export root directory for this run (does not change saved default)")
+	flag.StringVar(&opts.setOutputDir, "set-output-dir", "", "save or change the default export directory, then exit")
 	flag.Parse()
+	if flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "unexpected positional arguments; use -help")
+		os.Exit(2)
+	}
+	opts.explicit = make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { opts.explicit[f.Name] = true })
+	if opts.single {
+		opts.showAll = true
+	}
 	return opts
 }
 
-func parseExportFormat(raw string) (exportFormat, error) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "html", "htm":
-		return formatHTML, nil
-	case "markdown", "md":
-		return formatMarkdown, nil
-	default:
-		return "", fmt.Errorf("unsupported output format %q (use markdown or html)", raw)
-	}
-}
-
-func listSessions(sessionsDir string, currentCwd string, showAll bool) ([]sessionSummary, error) {
-	rolloutFiles, err := findRolloutFiles(sessionsDir)
-	if err != nil {
-		return nil, fmt.Errorf("scan sessions directory: %w", err)
-	}
-	threadTitles, err := loadThreadNameIndex(sessionsDir)
-	if err != nil {
-		return nil, fmt.Errorf("read session index: %w", err)
-	}
-	codexHome := filepath.Dir(sessionsDir)
-	dbTitles, err := loadThreadTitlesFromStateDB(codexHome)
-	if err == nil {
-		for threadID, title := range dbTitles {
-			if _, exists := threadTitles[threadID]; exists {
-				continue
-			}
-			threadTitles[threadID] = title
-		}
-	}
-
-	normalizedCurrent := normalizePath(currentCwd)
-	summaries := make([]sessionSummary, 0, len(rolloutFiles))
-	for _, rolloutPath := range rolloutFiles {
-		summary, ok, err := readSummaryFromRollout(rolloutPath)
-		if err != nil {
-			continue
-		}
-		if !ok {
-			continue
-		}
-		if !showAll {
-			if summary.Cwd == "" {
-				continue
-			}
-			if normalizePath(summary.Cwd) != normalizedCurrent {
-				continue
-			}
-		}
-		if summary.SessionID != "" {
-			summary.Title = threadTitles[summary.SessionID]
-		}
-		summaries = append(summaries, summary)
-	}
-
-	sort.SliceStable(summaries, func(i, j int) bool {
-		left := summaries[i]
-		right := summaries[j]
-		if !left.CreatedAt.IsZero() && !right.CreatedAt.IsZero() {
-			if !left.CreatedAt.Equal(right.CreatedAt) {
-				return left.CreatedAt.After(right.CreatedAt)
-			}
-		}
-		return left.UpdatedAt.After(right.UpdatedAt)
-	})
-
-	return summaries, nil
-}
-
-func findRolloutFiles(root string) ([]string, error) {
-	files := make([]string, 0)
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if strings.HasPrefix(d.Name(), "rollout-") && strings.HasSuffix(d.Name(), ".jsonl") {
-			files = append(files, path)
+func validateOptions(opts options) error {
+	provided := func(name string, value bool) bool { return opts.explicit[name] || value }
+	if provided("version", opts.version) {
+		if len(opts.explicit) > 1 {
+			return errors.New("-version cannot be combined with export options")
 		}
 		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
-	return files, nil
-}
-
-func readSummaryFromRollout(path string) (sessionSummary, bool, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return sessionSummary{}, false, err
+	if provided("single", opts.single) && (opts.batch || provided("last", opts.last) || provided("session-id", opts.sessionID != "")) {
+		return errors.New("-single opens the Session Picker; cannot combine with -batch, -last or -session-id")
 	}
-	defer file.Close()
-
-	summary := sessionSummary{Path: path}
-	fileInfo, statErr := file.Stat()
-	if statErr == nil {
-		summary.UpdatedAt = fileInfo.ModTime()
-	}
-	summary.CreatedAt = parseCreatedAtFromFilename(filepath.Base(path))
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024*1024), scannerBufferSize)
-
-	metaFound := false
-
-	for scanner.Scan() {
-		line := rolloutLine{}
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue
+	if provided("set-output-dir", opts.setOutputDir != "") {
+		if strings.TrimSpace(opts.setOutputDir) == "" {
+			return errors.New("-set-output-dir must not be empty")
 		}
-		switch line.Type {
-		case "session_meta":
-			if metaFound {
-				continue
-			}
-			meta := sessionMetaPayload{}
-			if err := json.Unmarshal(line.Payload, &meta); err != nil {
-				continue
-			}
-			source := decodeSource(meta.SourceRaw)
-			if !isInteractiveSource(source) {
-				return sessionSummary{}, false, nil
-			}
-			summary.SessionID = meta.ID
-			summary.Cwd = meta.Cwd
-			summary.Source = source
-			summary.ModelProvider = meta.ModelProvider
-			metaFound = true
+		if len(opts.explicit) > 1 || opts.single || opts.batch || opts.output != "" || opts.outputDir != "" || opts.project != "" || opts.last || opts.sessionID != "" || opts.showAll || opts.force || opts.full {
+			return errors.New("-set-output-dir is a standalone settings command; do not combine it with export options")
 		}
-
-		if metaFound {
-			break
+		return nil
+	}
+	if !opts.batch && provided("project", opts.project != "") {
+		return errors.New("-project requires -batch")
+	}
+	if provided("output", opts.output != "") && provided("output-dir", opts.outputDir != "") {
+		return errors.New("-output and -output-dir cannot be combined")
+	}
+	if opts.explicit["output-dir"] && strings.TrimSpace(opts.outputDir) == "" {
+		return errors.New("-output-dir must not be empty")
+	}
+	if opts.batch {
+		for _, field := range []struct {
+			name string
+			used bool
+		}{
+			{"output", opts.output != ""}, {"last", opts.last}, {"session-id", opts.sessionID != ""},
+			{"all", opts.showAll}, {"full", opts.full}, {"force", opts.force},
+		} {
+			if provided(field.name, field.used) {
+				return fmt.Errorf("-%s is a single-export option and cannot be used with -batch", field.name)
+			}
+		}
+		if opts.explicit["project"] && strings.TrimSpace(opts.project) == "" {
+			return errors.New("-project must not be empty")
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return sessionSummary{}, false, err
-	}
-	if !metaFound {
-		return sessionSummary{}, false, fmt.Errorf("missing session_meta in %s", path)
-	}
-	return summary, true, nil
+	return nil
 }
 
 func selectTargetSession(summaries []sessionSummary, opts options) (*sessionSummary, error) {
@@ -460,598 +292,6 @@ func selectTargetSession(summaries []sessionSummary, opts options) (*sessionSumm
 		return nil, nil
 	}
 	return &summaries[index], nil
-}
-
-func collectConversation(path string) (sessionMetaPayload, []exportMessage, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return sessionMetaPayload{}, nil, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024*1024), scannerBufferSize)
-
-	meta := sessionMetaPayload{}
-	metaFound := false
-	messages := make([]exportMessage, 0)
-	activeTurnID := ""
-	turnOrder := make([]string, 0)
-
-	for scanner.Scan() {
-		line := rolloutLine{}
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue
-		}
-		switch line.Type {
-		case "event_msg":
-			event := eventPayload{}
-			if err := json.Unmarshal(line.Payload, &event); err != nil {
-				continue
-			}
-			switch event.Type {
-			case "task_started":
-				if strings.TrimSpace(event.TurnID) == "" {
-					continue
-				}
-				activeTurnID = event.TurnID
-				if len(turnOrder) == 0 || turnOrder[len(turnOrder)-1] != activeTurnID {
-					turnOrder = append(turnOrder, activeTurnID)
-				}
-			case "thread_rolled_back":
-				messages, turnOrder, activeTurnID = rollbackConversationTurns(messages, turnOrder, activeTurnID, event.NumTurns)
-			}
-		case "session_meta":
-			if metaFound {
-				continue
-			}
-			if err := json.Unmarshal(line.Payload, &meta); err == nil {
-				metaFound = true
-			}
-		case "response_item":
-			item := responseItem{}
-			if err := json.Unmarshal(line.Payload, &item); err != nil {
-				continue
-			}
-			if item.Type != "message" {
-				continue
-			}
-			if item.Role != "user" && item.Role != "assistant" {
-				continue
-			}
-			body := strings.TrimSpace(cleanExportBody(extractMessageBody(item.Content)))
-			if body == "" {
-				continue
-			}
-			messages = append(messages, exportMessage{Role: item.Role, Phase: item.Phase, Body: body, turnID: activeTurnID})
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return sessionMetaPayload{}, nil, err
-	}
-	if !metaFound {
-		return sessionMetaPayload{}, nil, errors.New("session metadata not found")
-	}
-	return meta, messages, nil
-}
-
-func selectMessagesForExport(messages []exportMessage, full bool) []exportMessage {
-	if full {
-		return messages
-	}
-	filtered := make([]exportMessage, 0, len(messages))
-	for _, msg := range messages {
-		switch msg.Role {
-		case "user":
-			if isSystemInjectedUserMessage(msg.Body) {
-				continue
-			}
-			filtered = append(filtered, msg)
-		case "assistant":
-			phase := strings.ToLower(strings.TrimSpace(msg.Phase))
-			if phase == "final" || phase == "final_answer" {
-				filtered = append(filtered, msg)
-			}
-		}
-	}
-	return filtered
-}
-
-func rollbackConversationTurns(messages []exportMessage, turnOrder []string, activeTurnID string, numTurns int) ([]exportMessage, []string, string) {
-	if numTurns <= 0 || len(turnOrder) == 0 {
-		return messages, turnOrder, activeTurnID
-	}
-
-	removed := make(map[string]struct{}, numTurns)
-	for i := 0; i < numTurns && len(turnOrder) > 0; i++ {
-		turnID := turnOrder[len(turnOrder)-1]
-		turnOrder = turnOrder[:len(turnOrder)-1]
-		if turnID != "" {
-			removed[turnID] = struct{}{}
-		}
-	}
-	if len(removed) == 0 {
-		return messages, turnOrder, activeTurnID
-	}
-
-	kept := messages[:0]
-	for _, msg := range messages {
-		if _, ok := removed[msg.turnID]; ok {
-			continue
-		}
-		kept = append(kept, msg)
-	}
-	if _, ok := removed[activeTurnID]; ok {
-		activeTurnID = ""
-	}
-	return kept, turnOrder, activeTurnID
-}
-
-func isSystemInjectedUserMessage(body string) bool {
-	trimmed := strings.TrimSpace(body)
-	if trimmed == "" {
-		return false
-	}
-	prefixes := []string{
-		"# AGENTS.md instructions for ",
-		"<environment_context>",
-		"<subagent_notification>",
-		"<turn_aborted>",
-		"<permissions instructions>",
-		"<collaboration_mode>",
-	}
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(trimmed, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func buildExportContent(summary sessionSummary, meta sessionMetaPayload, messages []exportMessage, includeMeta bool, format exportFormat) (string, error) {
-	exporter := conversationExporter{
-		summary:     summary,
-		meta:        meta,
-		messages:    messages,
-		includeMeta: includeMeta,
-	}
-	switch format {
-	case formatMarkdown:
-		return exporter.Markdown(), nil
-	case formatHTML:
-		html, err := exporter.HTML()
-		if err != nil {
-			return "", fmt.Errorf("build html export: %w", err)
-		}
-		return html, nil
-	default:
-		return "", fmt.Errorf("unsupported output format %q", format)
-	}
-}
-
-func buildMarkdown(summary sessionSummary, meta sessionMetaPayload, messages []exportMessage, includeMeta bool) string {
-	return conversationExporter{
-		summary:     summary,
-		meta:        meta,
-		messages:    messages,
-		includeMeta: includeMeta,
-	}.Markdown()
-}
-
-func buildHTML(summary sessionSummary, meta sessionMetaPayload, messages []exportMessage, includeMeta bool) (string, error) {
-	return conversationExporter{
-		summary:     summary,
-		meta:        meta,
-		messages:    messages,
-		includeMeta: includeMeta,
-	}.HTML()
-}
-
-func (e conversationExporter) Markdown() string {
-	var sb strings.Builder
-	mainTitle := "Codex Session Export"
-	if !e.includeMeta {
-		mainTitle = displayTitle(e.summary.Title)
-	}
-	sb.WriteString(fmt.Sprintf("# %s\n\n", mainTitle))
-	sb.WriteString(markdownSessionStartMarker(e))
-	sb.WriteString("\n\n")
-	if e.includeMeta {
-		sb.WriteString(fmt.Sprintf("- Title: `%s`\n", displayTitle(e.summary.Title)))
-		sb.WriteString(fmt.Sprintf("- Session ID: `%s`\n", nonEmpty(e.meta.ID, e.summary.SessionID)))
-		sb.WriteString(fmt.Sprintf("- Source: `%s`\n", nonEmpty(decodeSource(e.meta.SourceRaw), e.summary.Source)))
-		sb.WriteString(fmt.Sprintf("- Model Provider: `%s`\n", nonEmpty(e.meta.ModelProvider, e.summary.ModelProvider)))
-		sb.WriteString(fmt.Sprintf("- CWD: `%s`\n", nonEmpty(e.meta.Cwd, e.summary.Cwd)))
-		sb.WriteString(fmt.Sprintf("- Created: `%s`\n", nonEmpty(e.meta.Timestamp, formatTime(e.summary.CreatedAt))))
-		sb.WriteString(fmt.Sprintf("- Updated: `%s`\n", formatTime(e.summary.UpdatedAt)))
-		sb.WriteString(fmt.Sprintf("- Rollout File: `%s`\n", e.summary.Path))
-		sb.WriteString(fmt.Sprintf("- Exported At: `%s`\n", time.Now().Format(time.RFC3339)))
-		sb.WriteString("\n")
-	}
-	conversationHeading := "## Conversation"
-	if !e.includeMeta {
-		conversationHeading = "## Transcript"
-	}
-	sb.WriteString(conversationHeading + "\n\n")
-
-	if len(e.messages) == 0 {
-		sb.WriteString("_No user/assistant message found in this session._\n")
-		sb.WriteString("\n")
-		sb.WriteString(markdownSessionEndMarker(e))
-		sb.WriteString("\n")
-		return sb.String()
-	}
-
-	for i, msg := range e.messages {
-		index := i + 1
-		sb.WriteString(markdownMessageStartMarker(index, msg))
-		sb.WriteString("\n\n")
-		sb.WriteString(markdownSpeakerLine(msg))
-		sb.WriteString("\n\n")
-		sb.WriteString(cleanExportBody(msg.Body))
-		sb.WriteString("\n")
-		sb.WriteString("\n")
-		sb.WriteString(markdownMessageEndMarker(index))
-		if i != len(e.messages)-1 {
-			sb.WriteString("\n\n---\n\n")
-		}
-	}
-	sb.WriteString("\n\n")
-	sb.WriteString(markdownSessionEndMarker(e))
-	sb.WriteString("\n")
-
-	return sb.String()
-}
-
-func (e conversationExporter) HTML() (string, error) {
-	messages := make([]htmlMessageView, 0, len(e.messages))
-	for i, msg := range e.messages {
-		body, err := renderMarkdownFragment(cleanExportBody(msg.Body))
-		if err != nil {
-			return "", fmt.Errorf("render message %d markdown: %w", i+1, err)
-		}
-		messages = append(messages, htmlMessageView{
-			Index:     i + 1,
-			Role:      msg.Role,
-			RoleClass: sanitizeMarkerValue(msg.Role),
-			RoleTitle: humanRole(msg.Role),
-			Phase:     strings.TrimSpace(msg.Phase),
-			Body:      body,
-		})
-	}
-
-	heading := displayTitle(e.summary.Title)
-	if e.includeMeta {
-		heading = "Codex Session Export"
-	}
-	exportedAt := time.Now().Format(time.RFC3339)
-	data := htmlPageData{
-		Title:               displayTitle(e.summary.Title),
-		Heading:             heading,
-		IncludeMeta:         e.includeMeta,
-		ConversationHeading: "Transcript",
-		MarkdownFilename:    markdownDownloadFilename(e.summary),
-		MarkdownSource:      e.Markdown(),
-		MetaRows:            e.htmlMetaRows(exportedAt),
-		Messages:            messages,
-		ExportedAt:          exportedAt,
-	}
-	if e.includeMeta {
-		data.ConversationHeading = "Conversation"
-	}
-
-	var sb strings.Builder
-	tmpl, err := template.New("session-html").Parse(sessionHTMLTemplate)
-	if err != nil {
-		return "", fmt.Errorf("parse html template: %w", err)
-	}
-	if err := tmpl.Execute(&sb, data); err != nil {
-		return "", fmt.Errorf("execute html template: %w", err)
-	}
-	return sb.String(), nil
-}
-
-func (e conversationExporter) htmlMetaRows(exportedAt string) []htmlMetaRow {
-	if !e.includeMeta {
-		return nil
-	}
-	return []htmlMetaRow{
-		{Label: "Title", Value: displayTitle(e.summary.Title)},
-		{Label: "Session ID", Value: nonEmpty(e.meta.ID, e.summary.SessionID)},
-		{Label: "Source", Value: nonEmpty(decodeSource(e.meta.SourceRaw), e.summary.Source)},
-		{Label: "Model Provider", Value: nonEmpty(e.meta.ModelProvider, e.summary.ModelProvider)},
-		{Label: "CWD", Value: nonEmpty(e.meta.Cwd, e.summary.Cwd)},
-		{Label: "Created", Value: nonEmpty(e.meta.Timestamp, formatTime(e.summary.CreatedAt))},
-		{Label: "Updated", Value: formatTime(e.summary.UpdatedAt)},
-		{Label: "Rollout File", Value: e.summary.Path},
-		{Label: "Exported At", Value: exportedAt},
-	}
-}
-
-func markdownDownloadFilename(summary sessionSummary) string {
-	return filepath.Base(determineOutputPath("", summary, formatMarkdown))
-}
-
-func determineOutputPath(output string, summary sessionSummary, format exportFormat) string {
-	if output != "" {
-		return output
-	}
-	sessionID := summary.SessionID
-	if sessionID == "" {
-		sessionID = strings.TrimSuffix(filepath.Base(summary.Path), filepath.Ext(summary.Path))
-	}
-	return filepath.Join(".", fmt.Sprintf("codex-session-%s%s", sessionID, format.fileExtension()))
-}
-
-func (format exportFormat) fileExtension() string {
-	switch format {
-	case formatHTML:
-		return ".html"
-	default:
-		return ".md"
-	}
-}
-
-func cleanExportBody(body string) string {
-	cleaned := memoryCitationBlockPattern.ReplaceAllString(body, "\n\n")
-	cleaned = excessiveBlankLinesPattern.ReplaceAllString(cleaned, "\n\n")
-	return strings.TrimSpace(cleaned)
-}
-
-func markdownSessionStartMarker(e conversationExporter) string {
-	if !e.includeMeta {
-		return "<!-- codex-exporter:session-start format=markdown -->"
-	}
-	return fmt.Sprintf(
-		"<!-- codex-exporter:session-start id=%s format=markdown -->",
-		sanitizeMarkerValue(nonEmpty(e.meta.ID, e.summary.SessionID)),
-	)
-}
-
-func markdownSessionEndMarker(e conversationExporter) string {
-	if !e.includeMeta {
-		return "<!-- codex-exporter:session-end -->"
-	}
-	return fmt.Sprintf(
-		"<!-- codex-exporter:session-end id=%s -->",
-		sanitizeMarkerValue(nonEmpty(e.meta.ID, e.summary.SessionID)),
-	)
-}
-
-func markdownMessageStartMarker(index int, msg exportMessage) string {
-	parts := []string{
-		"codex-exporter:message-start",
-		fmt.Sprintf("index=%d", index),
-		fmt.Sprintf("role=%s", sanitizeMarkerValue(msg.Role)),
-	}
-	if strings.TrimSpace(msg.Phase) != "" {
-		parts = append(parts, fmt.Sprintf("phase=%s", sanitizeMarkerValue(msg.Phase)))
-	}
-	return fmt.Sprintf("<!-- %s -->", strings.Join(parts, " "))
-}
-
-func markdownMessageEndMarker(index int) string {
-	return fmt.Sprintf("<!-- codex-exporter:message-end index=%d -->", index)
-}
-
-func markdownSpeakerLine(msg exportMessage) string {
-	line := fmt.Sprintf("**Speaker:** %s", humanRole(msg.Role))
-	if strings.TrimSpace(msg.Phase) != "" {
-		line += fmt.Sprintf("  \n**Phase:** `%s`", strings.TrimSpace(msg.Phase))
-	}
-	return line
-}
-
-func sanitizeMarkerValue(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return "unknown"
-	}
-	var sb strings.Builder
-	for _, r := range trimmed {
-		switch {
-		case r >= 'a' && r <= 'z':
-			sb.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			sb.WriteRune(r)
-		case r >= '0' && r <= '9':
-			sb.WriteRune(r)
-		case r == '-' || r == '_' || r == '.' || r == ':':
-			sb.WriteRune(r)
-		default:
-			sb.WriteRune('_')
-		}
-	}
-	if sb.Len() == 0 {
-		return "unknown"
-	}
-	return sb.String()
-}
-
-func renderMarkdownFragment(markdown string) (template.HTML, error) {
-	var buf bytes.Buffer
-	if err := goldmark.Convert([]byte(markdown), &buf); err != nil {
-		return "", err
-	}
-	return template.HTML(buf.String()), nil
-}
-
-func loadThreadNameIndex(sessionsDir string) (map[string]string, error) {
-	indexPath := filepath.Join(filepath.Dir(sessionsDir), "session_index.jsonl")
-	if _, err := os.Stat(indexPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return map[string]string{}, nil
-		}
-		return nil, err
-	}
-	file, err := os.Open(indexPath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	names := make(map[string]string)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), scannerBufferSize)
-	for scanner.Scan() {
-		var entry sessionIndexEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			continue
-		}
-		if strings.TrimSpace(entry.ID) == "" {
-			continue
-		}
-		trimmed := strings.TrimSpace(entry.ThreadName)
-		if trimmed == "" {
-			continue
-		}
-		// session_index is append-only; later entry wins.
-		names[entry.ID] = trimmed
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return names, nil
-}
-
-func loadThreadTitlesFromStateDB(codexHome string) (map[string]string, error) {
-	if _, err := exec.LookPath("sqlite3"); err != nil {
-		return map[string]string{}, nil
-	}
-	dbPath, ok := findStateDBPath(codexHome)
-	if !ok {
-		return map[string]string{}, nil
-	}
-
-	cmd := exec.Command(
-		"sqlite3",
-		"-noheader",
-		"-separator",
-		"\t",
-		dbPath,
-		"SELECT id, title FROM threads WHERE title <> '';",
-	)
-	output, err := cmd.Output()
-	if err != nil {
-		return map[string]string{}, nil
-	}
-	return parseThreadTitleLines(string(output)), nil
-}
-
-func parseThreadTitleLines(raw string) map[string]string {
-	result := make(map[string]string)
-	lines := strings.Split(raw, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		id := strings.TrimSpace(parts[0])
-		title := strings.TrimSpace(parts[1])
-		if id == "" || title == "" {
-			continue
-		}
-		result[id] = title
-	}
-	return result
-}
-
-func findStateDBPath(codexHome string) (string, bool) {
-	entries, err := os.ReadDir(codexHome)
-	if err != nil {
-		return "", false
-	}
-	bestNumber := -1
-	bestPath := ""
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		matches := stateDBPattern.FindStringSubmatch(entry.Name())
-		if len(matches) != 2 {
-			continue
-		}
-		n, err := strconv.Atoi(matches[1])
-		if err != nil {
-			continue
-		}
-		if n <= bestNumber {
-			continue
-		}
-		bestNumber = n
-		bestPath = filepath.Join(codexHome, entry.Name())
-	}
-	if bestPath == "" {
-		return "", false
-	}
-	return bestPath, true
-}
-
-func extractMessageBody(content []contentItem) string {
-	if len(content) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(content))
-	for _, item := range content {
-		switch item.Type {
-		case "input_text", "output_text":
-			if strings.TrimSpace(item.Text) != "" {
-				parts = append(parts, item.Text)
-			}
-		case "input_image":
-			if item.ImageURL != "" {
-				parts = append(parts, fmt.Sprintf("![input image](%s)", item.ImageURL))
-			}
-		}
-	}
-	return strings.Join(parts, "\n\n")
-}
-
-func parseCreatedAtFromFilename(name string) time.Time {
-	matches := rolloutNamePattern.FindStringSubmatch(name)
-	if len(matches) != 2 {
-		return time.Time{}
-	}
-	t, err := time.ParseInLocation("2006-01-02T15-04-05", matches[1], time.Local)
-	if err != nil {
-		return time.Time{}
-	}
-	return t
-}
-
-func decodeSource(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var sourceString string
-	if err := json.Unmarshal(raw, &sourceString); err == nil {
-		return sourceString
-	}
-	var sourceMap map[string]any
-	if err := json.Unmarshal(raw, &sourceMap); err == nil {
-		if _, ok := sourceMap["sub_agent"]; ok {
-			return "sub_agent"
-		}
-		if _, ok := sourceMap["subagent"]; ok {
-			return "subagent"
-		}
-	}
-	return ""
-}
-
-func isInteractiveSource(source string) bool {
-	return source == "cli" || source == "vscode"
-}
-
-func formatTime(t time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-	return t.Format("2006-01-02 15:04:05")
 }
 
 func truncateString(input string, limit int) string {
@@ -1130,7 +370,12 @@ func normalizePath(path string) string {
 	if symlinkResolved, err := filepath.EvalSymlinks(resolved); err == nil {
 		resolved = symlinkResolved
 	}
-	return filepath.Clean(resolved)
+	resolved = filepath.Clean(resolved)
+	if runtime.GOOS == "windows" {
+		resolved = strings.TrimPrefix(resolved, `\\?\`)
+		resolved = strings.ToLower(resolved)
+	}
+	return resolved
 }
 
 func expandHome(path string) string {
@@ -1141,23 +386,13 @@ func expandHome(path string) string {
 		}
 		return path
 	}
-	if strings.HasPrefix(path, "~/") {
+	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
 		home, err := os.UserHomeDir()
 		if err == nil {
 			return filepath.Join(home, path[2:])
 		}
 	}
 	return path
-}
-
-func nonEmpty(primary string, fallback string) string {
-	if strings.TrimSpace(primary) != "" {
-		return primary
-	}
-	if strings.TrimSpace(fallback) != "" {
-		return fallback
-	}
-	return "-"
 }
 
 func humanRole(role string) string {
