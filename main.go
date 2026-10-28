@@ -113,7 +113,7 @@ func run() error {
 		return err
 	}
 	if opts.version {
-		fmt.Printf("Codex Exporter %s\n", version)
+		fmt.Printf("Codex Markdown Exporter %s\n", version)
 		return nil
 	}
 	if len(os.Args) == 1 {
@@ -193,7 +193,7 @@ func runSingleExport(opts options) error {
 func parseFlags() options {
 	var opts options
 	flag.CommandLine.Usage = func() {
-		fmt.Fprintln(flag.CommandLine.Output(), "Codex Exporter "+version+"\n无参数：中文主菜单（需要交互终端）\n-single：单独导出 | -batch：项目批量导出\n-set-output-dir <目录>：保存默认目录 | -output-dir <目录>：仅本次使用")
+		fmt.Fprintln(flag.CommandLine.Output(), "Codex Markdown Exporter "+version+"\n无参数：中文主菜单（需要交互终端）\n-single：单独导出 | -batch：项目批量导出\n-set-output-dir <目录>：保存默认目录 | -output-dir <目录>：仅本次使用")
 		flag.PrintDefaults()
 	}
 	flag.StringVar(&opts.sessionsDir, "sessions-dir", sessionStorageDirectory(), "Codex sessions directory")

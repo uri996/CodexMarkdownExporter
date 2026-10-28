@@ -36,6 +36,9 @@ func keyMessage(name string) tea.KeyMsg {
 }
 
 func TestPortableMenuActions(t *testing.T) {
+	if !strings.HasPrefix((menuModel{}).View(), "Codex Markdown Exporter "+version+"\n") {
+		t.Fatal("incorrect menu product name/version")
+	}
 	for choice := 0; choice < 4; choice++ {
 		var model tea.Model = menuModel{choice: -1}
 		for i := 0; i < choice; i++ {
@@ -273,8 +276,8 @@ func TestPortableCLIProcess(t *testing.T) {
 				break
 			}
 		}
-		os.Args = append([]string{"Codex-Exporter"}, os.Args[separator+1:]...)
-		flag.CommandLine = flag.NewFlagSet("Codex-Exporter", flag.ExitOnError)
+		os.Args = append([]string{"Codex-Markdown-Exporter"}, os.Args[separator+1:]...)
+		flag.CommandLine = flag.NewFlagSet("Codex-Markdown-Exporter", flag.ExitOnError)
 		if err := run(); err != nil {
 			os.Stderr.WriteString(err.Error())
 			os.Exit(1)
@@ -287,7 +290,7 @@ func TestPortableCLIProcess(t *testing.T) {
 		want string
 		fail bool
 	}{
-		{[]string{"-version"}, "Codex Exporter " + version, false},
+		{[]string{"-version"}, "Codex Markdown Exporter " + version, false},
 		{[]string{"-help"}, "中文主菜单", false},
 		{nil, "交互式终端", true},
 		{[]string{"-single", "-batch"}, "cannot combine", true},
@@ -303,7 +306,7 @@ func TestPortableCLIProcess(t *testing.T) {
 }
 
 func TestWindowsPortablePackage(t *testing.T) {
-	path := filepath.Join("dist", "Codex-Exporter-"+version+"-windows-amd64.zip")
+	path := filepath.Join("dist", "Codex-Markdown-Exporter-"+version+"-windows-amd64.zip")
 	archive, err := zip.OpenReader(path)
 	if errors.Is(err, os.ErrNotExist) {
 		t.Skip("run scripts/build-windows.ps1 before package acceptance")
@@ -312,10 +315,10 @@ func TestWindowsPortablePackage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer archive.Close()
-	if len(archive.File) != 3 {
-		t.Fatal("ZIP must contain exactly three allowlisted files")
+	if len(archive.File) != 4 {
+		t.Fatal("ZIP must contain exactly four allowlisted files")
 	}
-	want := map[string]bool{"Codex-Exporter.exe": true, "README.txt": true, "LICENSE": true}
+	want := map[string]bool{"Codex-Markdown-Exporter.exe": true, "README.txt": true, "LICENSE": true, "THIRD_PARTY_NOTICES.txt": true}
 	extracted := t.TempDir()
 	for _, f := range archive.File {
 		if !want[f.Name] {
@@ -361,14 +364,16 @@ func TestWindowsPortablePackage(t *testing.T) {
 		}
 		if f.Name == "README.txt" {
 			instructions, err := os.ReadFile("docs/portable-README.txt")
-			if err != nil || !bytes.HasPrefix(data, instructions) {
+			if err != nil || !bytes.Equal(data, instructions) {
 				t.Fatal("packaged instructions differ from current source")
 			}
+		}
+		if f.Name == "THIRD_PARTY_NOTICES.txt" {
 			notices, err := os.ReadFile("THIRD_PARTY_NOTICES.txt")
-			if err != nil || !bytes.HasSuffix(data, notices) {
+			if err != nil || !bytes.Equal(data, notices) {
 				t.Fatal("packaged dependency notices differ from current source")
 			}
-			for _, notice := range []string{"github.com/klauspost/compress v1.18.4", "Copyright (c) 2019 Klaus Post", "Copyright (c) 2016 Caleb Spare"} {
+			for _, notice := range []string{"github.com/klauspost/compress v1.18.4", "Copyright (c) 2019 Klaus Post", "Copyright (c) 2016 Caleb Spare", "Additional runtime dependency notices", "Go runtime notices", "Copyright (c) 2009 The Go Authors"} {
 				if !bytes.Contains(data, []byte(notice)) {
 					t.Fatal("missing redistributed dependency license", notice)
 				}
@@ -378,7 +383,7 @@ func TestWindowsPortablePackage(t *testing.T) {
 	if len(want) != 0 {
 		t.Fatal("missing ZIP files")
 	}
-	exe := filepath.Join(extracted, "Codex-Exporter.exe")
+	exe := filepath.Join(extracted, "Codex-Markdown-Exporter.exe")
 	binary, err := pe.Open(exe)
 	if err != nil {
 		t.Fatal(err)
@@ -397,7 +402,7 @@ func TestWindowsPortablePackage(t *testing.T) {
 	}
 	hash := sha256.Sum256(data)
 	checksum, err := os.ReadFile(path + ".sha256")
-	if err != nil || !strings.HasPrefix(string(checksum), fmt.Sprintf("%x", hash)) {
+	if err != nil || strings.TrimSpace(string(checksum)) != fmt.Sprintf("%x  %s", hash, filepath.Base(path)) {
 		t.Fatal("ZIP checksum mismatch")
 	}
 	if runtime.GOOS != "windows" {
@@ -420,14 +425,24 @@ func TestWindowsPortablePackage(t *testing.T) {
 		}
 		return string(out)
 	}
-	if !strings.Contains(invoke("-version"), version) {
+	if strings.TrimSpace(invoke("-version")) != "Codex Markdown Exporter "+version {
 		t.Fatal("wrong packaged version")
 	}
 	if !strings.Contains(invoke("-help"), "中文主菜单") {
 		t.Fatal("wrong packaged help")
 	}
 	root := filepath.Join(home, "独立便携验收")
-	invoke("-set-output-dir", root)
+	// A pre-rename settings file must work without running the new setter.
+	legacySettings, err := settingsPath()
+	if err != nil || !strings.HasSuffix(legacySettings, filepath.Join("codex-exporter", "settings.json")) {
+		t.Fatal("legacy settings location changed", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(legacySettings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacySettings, []byte(fmt.Sprintf("{\"output_directory\":%q}", root)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	invoke("-all", "-last")
 	files, _ := filepath.Glob(filepath.Join(root, "*.md"))
 	if len(files) != 1 {
@@ -463,5 +478,10 @@ func TestWindowsPortablePackage(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(launchDirectory); len(entries) != 0 {
 		t.Fatal("portable outputs or configuration leaked into launch directory")
+	}
+	for _, legacy := range []string{"Codex-Exporter.exe", "Codex-Exporter-v1.2.0-windows-amd64.zip", "Codex-Exporter-v1.2.0-windows-amd64.zip.sha256"} {
+		if _, err := os.Lstat(filepath.Join("dist", legacy)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("obsolete release artifact remains in dist", legacy)
+		}
 	}
 }

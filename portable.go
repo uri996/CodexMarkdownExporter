@@ -15,7 +15,7 @@ import (
 )
 
 // Override with -ldflags "-X main.version=..." when building a release.
-var version = "v1.2.0"
+var version = "v1.2.1"
 
 func sessionStorageDirectory() string {
 	if home := os.Getenv("CODEX_HOME"); home != "" {
@@ -71,7 +71,7 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 func (m menuModel) View() string {
 	var out strings.Builder
-	fmt.Fprintf(&out, "Codex Exporter %s\n\n请选择操作：\n\n", version)
+	fmt.Fprintf(&out, "Codex Markdown Exporter %s\n\n请选择操作：\n\n", version)
 	for i, label := range []string{"单独导出一个会话", "按项目批量导出", "设置默认保存目录", "退出"} {
 		marker := "  "
 		if i == m.cursor {

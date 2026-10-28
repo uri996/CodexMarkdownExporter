@@ -1,11 +1,11 @@
-Codex Exporter v1.2.0
+Codex Markdown Exporter v1.2.1
 Windows 64 位便携版使用说明
 
 ========================================
 一、软件介绍
 ========================================
 
-Codex Exporter 是一个本地 Codex 对话导出工具。
+Codex Markdown Exporter 是一个本地 Codex 对话导出工具。
 
 支持将 Codex 历史会话导出为 Markdown 文件，保留真实用户 Prompt、助手最终回答及原始对话顺序。
 
@@ -20,8 +20,8 @@ Codex Exporter 是一个本地 Codex 对话导出工具。
 二、安装与启动
 ========================================
 
-1. 完整解压 ZIP 文件。
-2. 双击 Codex-Exporter.exe。
+1. 完整解压 Codex-Markdown-Exporter-v1.2.1-windows-amd64.zip 文件。
+2. 双击 Codex-Markdown-Exporter.exe。
 3. 在中文菜单中选择需要的功能。
 
 无需安装 Go、Python 或其他开发环境。
@@ -110,22 +110,22 @@ Esc      退出
 除主菜单外，也可以通过终端运行：
 
 查看帮助：
-Codex-Exporter.exe -help
+Codex-Markdown-Exporter.exe -help
 
 查看版本：
-Codex-Exporter.exe -version
+Codex-Markdown-Exporter.exe -version
 
 单独导出：
-Codex-Exporter.exe -single
+Codex-Markdown-Exporter.exe -single
 
 项目批量导出：
-Codex-Exporter.exe -batch
+Codex-Markdown-Exporter.exe -batch
 
 修改默认保存目录：
-Codex-Exporter.exe -set-output-dir "D:\Codex-Exports"
+Codex-Markdown-Exporter.exe -set-output-dir "D:\Codex-Exports"
 
 临时指定保存目录：
-Codex-Exporter.exe -batch -output-dir "D:\Codex-Exports"
+Codex-Markdown-Exporter.exe -batch -output-dir "D:\Codex-Exports"
 
 以上路径仅为示例，请替换为自己的目录。
 

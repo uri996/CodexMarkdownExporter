@@ -1,4 +1,4 @@
-# Codex Exporter
+# Codex Markdown Exporter
 
 一个轻量级的本地 Codex 对话导出工具，支持将 Codex 历史会话整理为清晰、易读的 Markdown 文件。
 
@@ -6,7 +6,7 @@
 
 本项目基于 [faceair/codex-exporter](https://github.com/faceair/codex-exporter) 修改与扩展。
 
-当前版本：**v1.2.0**
+当前版本：**v1.2.1**
 
 ## 主要功能
 
@@ -41,15 +41,11 @@
 
 ### 下载与启动
 
-Windows 64 位便携版文件：
+[**前往 GitHub Releases 下载最新 Windows 便携版**](https://github.com/uri996/CodexMarkdownExporter/releases/latest)
 
-```
-Codex-Exporter-v1.2.0-windows-amd64.zip
-```
+在 Releases 页面的 Assets 中下载 Windows 64 位便携版 ZIP。
 
-正式 GitHub Release 发布后，可在 Releases 页面获取。
-
-解压 ZIP 后，双击 `Codex-Exporter.exe` 即可运行，无需安装 Go、Python 或其他解压工具。
+完整解压后，双击 `Codex-Markdown-Exporter.exe` 即可运行，无需安装 Go、Python 或其他开发工具。
 
 程序提供中文终端菜单：
 
@@ -58,7 +54,7 @@ Codex-Exporter-v1.2.0-windows-amd64.zip
 3. 设置默认保存目录
 4. 退出
 
-使用方向键选择，按 Enter 确认，Esc 退出。
+使用方向键选择，按 Enter 确认，Esc 退出。支持单独导出、按项目批量导出及自定义保存目录。
 
 ### 设置保存目录
 
@@ -88,17 +84,17 @@ Codex-Exporter-v1.2.0-windows-amd64.zip
 导出的 Markdown 内容类似：
 
 ```
-# 设计模板编辑器
+# 示例会话
 
 # 🧑 User
 
-请为当前项目新增模板编辑器，并保留已有功能。
+请为示例程序添加一个简单的搜索功能。
 
 ---
 
 # 💻 Assistant
 
-已完成模板编辑器的实现……
+已完成搜索功能的实现。
 
 ---
 ```
@@ -126,24 +122,38 @@ YYYYMMDD_会话标题.md
 
 除了交互式菜单，也可以通过命令行使用。
 
+常用命令行参数：
+
+- `-single`：打开单独导出会话列表。
+- `-batch`：进入按项目批量导出模式。
+- `-project`：指定需要批量导出的项目目录。
+- `-output-dir`：临时指定本次导出的保存目录。
+- `-set-output-dir`：设置并保存默认导出目录。
+- `-version`：查看当前程序版本。
+
+更多高级参数请使用 `-help` 查看。
+
 ```
 # 单独导出
-.\Codex-Exporter.exe -single
+.\Codex-Markdown-Exporter.exe -single
 
 # 按项目批量导出
-.\Codex-Exporter.exe -batch
+.\Codex-Markdown-Exporter.exe -batch
 
 # 指定项目批量导出
-.\Codex-Exporter.exe -batch -project "D:\Projects\Example"
+.\Codex-Markdown-Exporter.exe -batch -project "D:\Projects\Example"
 
 # 修改默认保存目录
-.\Codex-Exporter.exe -set-output-dir "D:\Codex-Exports"
+.\Codex-Markdown-Exporter.exe -set-output-dir "D:\Codex-Exports"
 
 # 本次使用指定保存目录
-.\Codex-Exporter.exe -batch -output-dir "D:\Codex-Exports"
+.\Codex-Markdown-Exporter.exe -batch -output-dir "D:\Codex-Exports"
 
 # 查看所有参数
-.\Codex-Exporter.exe -help
+.\Codex-Markdown-Exporter.exe -help
+
+# 查看版本号
+.\Codex-Markdown-Exporter.exe -version
 ```
 
 高级参数包括 `-all`、`-last`、`-session-id`、`-output`、`-force`、`-full` 和 `-sessions-dir`，具体使用方法参见 `-help`。
@@ -198,7 +208,6 @@ Windows 下可使用现有构建脚本生成 EXE 与 ZIP：
 
 本项目基于 [faceair/codex-exporter](https://github.com/faceair/codex-exporter) 修改与扩展，感谢原作者的开源贡献。
 
-本项目沿用 [MIT License](app://-/LICENSE)，保留原项目的版权声明。
+本项目沿用 [MIT License](LICENSE)，保留原项目的版权声明。
 
-第三方依赖及其许可证信息参见 [THIRD_PARTY_NOTICES.txt](app://-/THIRD_PARTY_NOTICES.txt)。
-
+第三方依赖及其许可证信息参见 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)。
