@@ -1,5 +1,6 @@
 /dist/
 /codex-exporter.exe
+/Codex-Markdown-Exporter.exe
 /.codex-exporter/
 /settings.json
 *.jsonl

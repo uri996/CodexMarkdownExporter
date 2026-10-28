@@ -17,7 +17,7 @@ func syntheticPortable(t *testing.T) string {
 	t.Cleanup(func() { portableBuild, executableLocation = oldBuild, oldExecutable })
 	portableBuild = "true"
 	dir := filepath.Join(t.TempDir(), "中文 portable folder")
-	executableLocation = func() (string, error) { return filepath.Join(dir, "Codex-Exporter.exe"), nil }
+	executableLocation = func() (string, error) { return filepath.Join(dir, "Codex-Markdown-Exporter.exe"), nil }
 	return dir
 }
 
@@ -80,7 +80,7 @@ func TestPortableRelativeDirectoryAndSelection(t *testing.T) {
 		}
 	}
 	moved := t.TempDir()
-	executableLocation = func() (string, error) { return filepath.Join(moved, "Codex-Exporter.exe"), nil }
+	executableLocation = func() (string, error) { return filepath.Join(moved, "Codex-Markdown-Exporter.exe"), nil }
 	if got, _ := savedOutputRoot(); got != filepath.Join(moved, "exports") {
 		t.Fatal("relative setting did not follow EXE")
 	}
